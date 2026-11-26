@@ -11,8 +11,9 @@ scheduling, frequency scaling and noisy neighbours move decode times by
 several percent. So this lab splits the two jobs:
 
 - **CI** builds stock, NEON-MCT and fused trees at a pinned FFmpeg revision,
-  runs `checkasm`, and compares decoded `framemd5` against stock. A patch that
-  is not bit-exact fails the job.
+  runs `checkasm`, and compares decoded `framemd5` against stock. The minimal
+  upstreamable series must be bit-exact on every compiler; the explicit-FMA
+  lab trees are compared strictly where the compiler contracts (Clang).
 - **Local** runs the interleaved A/B timing on a quiet machine. Those are the
   numbers used to decide whether something is worth submitting.
 
@@ -21,11 +22,13 @@ check, not as a decode-time result.
 
 ## Result so far
 
-The NEON inverse ICT/RCT series is correct and bit-exact, but full-decode
-performance is neutral: on an M1 Pro the pass is about 0.5% of active CPU, and
-three 4096x1714 float planes are far larger than cache, so the kernel is
-DRAM-bound. `checkasm` with hot 6 KiB buffers shows the kernel is fast; the
-full decoder does not care.
+The NEON inverse ICT/RCT series is correct, but full-decode performance is
+neutral: on an M1 Pro the pass is about 0.5% of active CPU, and three
+4096x1714 float planes are far larger than cache, so the kernel is DRAM-bound.
+`checkasm` with hot 6 KiB buffers shows the kernel is fast; the full decoder
+does not care. Its explicit-FMA kernel matches Clang's contracted C reference
+bit-for-bit; GCC builds FFmpeg in ISO C mode and does not contract, so the
+rounded output can differ there, as it already can with FFmpeg's x86 FMA3 path.
 
 The useful change is to stop materialising the three MCT planes and instead
 apply the inverse ICT while writing the packed output frame. The gain comes
@@ -59,8 +62,9 @@ to the scalar reference: GCC builds FFmpeg in ISO C mode and does not contract,
 Clang contracts within the expression. The result is bit-exact with stock on
 both compilers, and the CI gate checks that per job.
 
-The full 240-frame `framemd5` is identical across stock, the minimal series
-and the full fused tree.
+On Clang, the full 240-frame `framemd5` is identical across stock, the minimal
+series and the full fused tree. On GCC, stock and the minimal series are
+identical; the explicit-FMA lab trees can differ, per the note above.
 
 ## CI runners
 
