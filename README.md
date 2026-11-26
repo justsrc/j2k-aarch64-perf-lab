@@ -28,20 +28,33 @@ DRAM-bound. `checkasm` with hot 6 KiB buffers shows the kernel is fast; the
 full decoder does not care.
 
 The useful change is to stop materialising the three MCT planes and instead
-apply the inverse ICT while writing the packed output frame. On a 24-frame
-4096x1714 XYZ 12-bit DCI 4K sample, interleaved on an M1 Pro:
+apply the inverse ICT while writing the packed output frame. The gain comes
+from removing one full read and one full write of the three component planes
+per frame and from replacing scalar `lrintf`/`av_clip` plus three strided
+stores with one NEON `fcvtns`/clip/`st3` pass.
 
-| threads | tree | real (s) | CPU (s) | speedup vs DWT+tier-1 |
-|--------:|------|---------:|--------:|----------------------:|
-| 1 | DWT + tier-1 | 3.753 | 3.735 | 1.000x |
-| 1 | DWT + tier-1 + fused output | 3.438 | 3.386 | **1.092x wall, 1.103x CPU** |
-| 8 | DWT + tier-1 | 0.712 | 4.272 | 1.000x |
-| 8 | DWT + tier-1 + fused output | 0.668 | 3.987 | **1.066x wall, 1.072x CPU** |
+On top of the DWT+tier-1 tree, 240-frame 4096x1714 XYZ 12-bit corpus,
+interleaved on an M1 Pro:
 
-The fused output is bit-exact with stock. The gain comes from removing one
-full read and one full write of the three component planes per frame and from
-replacing scalar `lrintf`/`av_clip` plus three strided stores with one NEON
-`fcvtns`/clip/`st3` pass.
+| threads | tree | real (s) | CPU (s) | speedup |
+|--------:|------|---------:|--------:|--------:|
+| 1 | DWT + tier-1 | 38.209 | 38.161 | 1.000x |
+| 1 | DWT + tier-1 + fused output | 35.476 | 35.421 | **1.077x wall, 1.077x CPU** |
+| 8 | DWT + tier-1 | 5.948 | 43.887 | 1.000x |
+| 8 | DWT + tier-1 + fused output | 5.609 | 41.018 | **1.060x wall, 1.070x CPU** |
+
+The minimal series (`0001` + `0002`) on clean FFmpeg, 24-frame sample, same
+machine, against stock at the same pinned revision:
+
+| threads | tree | real (s) | CPU (s) | speedup |
+|--------:|------|---------:|--------:|--------:|
+| 1 | stock | 10.662 | 10.637 | 1.000x |
+| 1 | packed writer + fused ICT | 10.232 | 10.222 | **1.042x wall, 1.041x CPU** |
+| 8 | stock | 2.076 | 13.807 | 1.000x |
+| 8 | packed writer + fused ICT | 2.002 | 13.460 | **1.037x wall, 1.026x CPU** |
+
+The full 240-frame `framemd5` is identical across stock, the minimal series
+and the full fused tree.
 
 ## CI runners
 
