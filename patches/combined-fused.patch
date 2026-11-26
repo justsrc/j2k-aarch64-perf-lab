@@ -1,0 +1,2183 @@
+diff --git a/libavcodec/aarch64/Makefile b/libavcodec/aarch64/Makefile
+index e560a8c312..2e3397e915 100644
+--- a/libavcodec/aarch64/Makefile
++++ b/libavcodec/aarch64/Makefile
+@@ -9,6 +9,7 @@ OBJS-$(CONFIG_H264PRED)                 += aarch64/h264pred_init.o
+ OBJS-$(CONFIG_H264QPEL)                 += aarch64/h264qpel_init_aarch64.o
+ OBJS-$(CONFIG_HPELDSP)                  += aarch64/hpeldsp_init_aarch64.o
+ OBJS-$(CONFIG_IDCTDSP)                  += aarch64/idctdsp_init_aarch64.o
++OBJS-$(CONFIG_JPEG2000_DECODER)         += aarch64/jpeg2000dsp_init_aarch64.o
+ OBJS-$(CONFIG_LLVIDDSP)                 += aarch64/lossless_videodsp_init.o
+ OBJS-$(CONFIG_ME_CMP)                   += aarch64/me_cmp_init_aarch64.o
+ OBJS-$(CONFIG_MPEGAUDIODSP)             += aarch64/mpegaudiodsp_init.o
+@@ -61,6 +62,7 @@ NEON-OBJS-$(CONFIG_HPELDSP)             += aarch64/hpeldsp_neon.o
+ NEON-OBJS-$(CONFIG_HUFFYUVDSP)          += aarch64/huffyuvdsp_neon.o
+ NEON-OBJS-$(CONFIG_IDCTDSP)             += aarch64/idctdsp_neon.o              \
+                                            aarch64/simple_idct_neon.o
++NEON-OBJS-$(CONFIG_JPEG2000_DECODER)    += aarch64/jpeg2000dsp_neon.o
+ NEON-OBJS-$(CONFIG_LLVIDDSP)            += aarch64/lossless_videodsp_neon.o
+ NEON-OBJS-$(CONFIG_ME_CMP)              += aarch64/me_cmp_neon.o
+ NEON-OBJS-$(CONFIG_MPEGAUDIODSP)        += aarch64/mpegaudiodsp_neon.o
+diff --git a/libavcodec/aarch64/jpeg2000dsp_init_aarch64.c b/libavcodec/aarch64/jpeg2000dsp_init_aarch64.c
+new file mode 100644
+index 0000000000..68fecabdab
+--- /dev/null
++++ b/libavcodec/aarch64/jpeg2000dsp_init_aarch64.c
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (c) 2026 Justin Jacob
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include "libavutil/attributes.h"
++#include "libavutil/cpu.h"
++#include "libavutil/aarch64/cpu.h"
++#include "libavcodec/jpeg2000dsp.h"
++
++void ff_ict_float_neon(void *src0, void *src1, void *src2, int csize);
++void ff_rct_int_neon(void *src0, void *src1, void *src2, int csize);
++
++av_cold void ff_jpeg2000dsp_init_aarch64(Jpeg2000DSPContext *c)
++{
++    int cpu_flags = av_get_cpu_flags();
++
++    if (have_neon(cpu_flags)) {
++        c->mct_decode[FF_DWT97] = ff_ict_float_neon;
++        c->mct_decode[FF_DWT53] = ff_rct_int_neon;
++    }
++}
+diff --git a/libavcodec/aarch64/jpeg2000dsp_neon.S b/libavcodec/aarch64/jpeg2000dsp_neon.S
+new file mode 100644
+index 0000000000..a8496048f8
+--- /dev/null
++++ b/libavcodec/aarch64/jpeg2000dsp_neon.S
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (c) 2026 Justin Jacob
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include "libavutil/aarch64/asm.S"
++
++/*
++ * Inverse irreversible color transform (float), FF_DWT97.
++ * x0 = src0, x1 = src1, x2 = src2, w3 = csize (float samples per plane)
++ *
++ * Bit-exact to the C implementation as compiled on arm64 with the default
++ * FP contraction: every multiply-accumulate is fused (fmla), and the
++ * negations of the two subtraction terms are folded into the constants,
++ * replicating the per-sample operation order of ict_float() in
++ * libavcodec/jpeg2000dsp.c.
++ */
++
++function ff_ict_float_neon, export=1
++        cbz             w3,  8f
++        mov             w8,  #0x74bc
++        movk            w8,  #0x3fb3, lsl #16
++        dup             v16.4s, w8           //  1.402
++        mov             w8,  #0x31cf
++        movk            w8,  #0xbeb0, lsl #16
++        dup             v17.4s, w8           // -0.34413
++        mov             w8,  #0xd1e1
++        movk            w8,  #0xbf36, lsl #16
++        dup             v18.4s, w8           // -0.71414
++        mov             w8,  #0xd0e5
++        movk            w8,  #0x3fe2, lsl #16
++        dup             v19.4s, w8           //  1.772
++        bic             w4,  w3, #3
++        cbz             w4,  2f
++1:      ld1             {v0.4s}, [x0]
++        ld1             {v1.4s}, [x1]
++        ld1             {v2.4s}, [x2]
++        subs            w4,  w4, #4
++        mov             v3.16b, v0.16b
++        fmla            v3.4s, v1.4s, v17.4s // i1 = src0 - 0.34413*src1
++        fmla            v3.4s, v2.4s, v18.4s // i1 = i1     - 0.71414*src2
++        mov             v4.16b, v0.16b
++        fmla            v4.4s, v1.4s, v19.4s // i2 = src0 + 1.772*src1
++        fmla            v0.4s, v2.4s, v16.4s // i0 = src0 + 1.402*src2
++        st1             {v0.4s}, [x0], #16
++        st1             {v3.4s}, [x1], #16
++        st1             {v4.4s}, [x2], #16
++        b.ne            1b
++2:      and             w3,  w3, #3
++        cbz             w3,  8f
++3:      ldr             s20, [x0]
++        ldr             s21, [x1]
++        ldr             s22, [x2]
++        fmadd           s23, s21, s17, s20   // t  = src0 - 0.34413*src1
++        fmadd           s23, s22, s18, s23   // i1 = t    - 0.71414*src2
++        fmadd           s24, s21, s19, s20   // i2 = src0 + 1.772*src1
++        fmadd           s20, s22, s16, s20   // i0 = src0 + 1.402*src2
++        str             s20, [x0], #4
++        str             s23, [x1], #4
++        str             s24, [x2], #4
++        subs            w3,  w3, #1
++        b.ne            3b
++8:      ret
++endfunc
++
++/*
++ * Reversible color transform (integer), FF_DWT53.
++ * x0 = src0, x1 = src1, x2 = src2, w3 = csize (int32 samples per plane)
++ */
++
++function ff_rct_int_neon, export=1
++        cbz             w3,  8f
++        bic             w4,  w3, #3
++        cbz             w4,  2f
++1:      ld1             {v0.4s}, [x0]
++        ld1             {v1.4s}, [x1]
++        ld1             {v2.4s}, [x2]
++        subs            w4,  w4, #4
++        add             v3.4s, v1.4s, v2.4s  // src1 + src2
++        sshr            v3.4s, v3.4s, #2
++        sub             v3.4s, v0.4s, v3.4s  // i1
++        add             v0.4s, v3.4s, v2.4s  // i0
++        add             v2.4s, v3.4s, v1.4s  // i2
++        st1             {v0.4s}, [x0], #16
++        st1             {v3.4s}, [x1], #16
++        st1             {v2.4s}, [x2], #16
++        b.ne            1b
++2:      and             w3,  w3, #3
++        cbz             w3,  8f
++3:      ldr             w5,  [x0]
++        ldr             w6,  [x1]
++        ldr             w7,  [x2]
++        add             w9,  w6, w7
++        asr             w9,  w9, #2
++        sub             w5,  w5, w9          // i1
++        add             w9,  w5, w7          // i0
++        add             w7,  w5, w6          // i2
++        str             w9,  [x0], #4
++        str             w5,  [x1], #4
++        str             w7,  [x2], #4
++        subs            w3,  w3, #1
++        b.ne            3b
++8:      ret
++endfunc
+diff --git a/libavcodec/jpeg2000.c b/libavcodec/jpeg2000.c
+index a21f9c2a82..8168c84518 100644
+--- a/libavcodec/jpeg2000.c
++++ b/libavcodec/jpeg2000.c
+@@ -82,7 +82,11 @@ void ff_tag_tree_zero(Jpeg2000TgtNode *t, int w, int h, int val)
+     }
+ }
+ 
+-uint8_t ff_jpeg2000_sigctxno_lut[256][4];
++uint8_t ff_jpeg2000_sigctxno_lut[4][256];
++/* Zero-coding context of a packed stripe column's 3x3 window, and sign
++ * context and XOR bit of its cardinal-neighbour key. */
++uint8_t ff_jpeg2000_sigctxno_window_lut[4][512];
++uint16_t ff_jpeg2000_sgnctxno_packed_lut[256];
+ 
+ static int getsigctxno(int flag, int bandno)
+ {
+@@ -127,7 +131,8 @@ static int getsigctxno(int flag, int bandno)
+     return 0;
+ }
+ 
+-uint8_t ff_jpeg2000_sgnctxno_lut[16][16], ff_jpeg2000_xorbit_lut[16][16];
++static uint8_t ff_jpeg2000_sgnctxno_lut[16][16];
++uint8_t ff_jpeg2000_sgn_lut[16][16];
+ 
+ static const int contribtab[3][3] = { {  0, -1,  1 }, { -1, -1,  0 }, {  1,  0,  1 } };
+ static const int  ctxlbltab[3][3] = { { 13, 12, 11 }, { 10,  9, 10 }, { 11, 12, 13 } };
+@@ -151,11 +156,44 @@ static void av_cold jpeg2000_init_tier1_luts(void)
+     int i, j;
+     for (i = 0; i < 256; i++)
+         for (j = 0; j < 4; j++)
+-            ff_jpeg2000_sigctxno_lut[i][j] = getsigctxno(i, j);
++            ff_jpeg2000_sigctxno_lut[j][i] = getsigctxno(i, j);
+     for (i = 0; i < 16; i++)
+-        for (j = 0; j < 16; j++)
+-            ff_jpeg2000_sgnctxno_lut[i][j] =
+-                getsgnctxno(i + (j << 8), &ff_jpeg2000_xorbit_lut[i][j]);
++        for (j = 0; j < 16; j++) {
++            uint8_t xorbit;
++
++            ff_jpeg2000_sgnctxno_lut[i][j] = getsgnctxno(i + (j << 8), &xorbit);
++            /* Context and XOR bit in one byte: the decoder needs both and
++             * fetching them together saves a dependent load per sign. */
++            ff_jpeg2000_sgn_lut[i][j] = ff_jpeg2000_sgnctxno_lut[i][j] |
++                                       (xorbit << 4);
++        }
++    /* The packed tier-1 representation indexes a 3x3 window whose neighbour
++     * order differs from the flag words; translate once here. */
++    for (i = 0; i < 512; i++) {
++        int flag = (((i >> 1) & 1) << 0) | (((i >> 5) & 1) << 1) |
++                   (((i >> 3) & 1) << 2) | (((i >> 7) & 1) << 3) |
++                   (((i >> 2) & 1) << 4) | (((i >> 0) & 1) << 5) |
++                   (((i >> 8) & 1) << 6) | (((i >> 6) & 1) << 7);
++
++        for (j = 0; j < 4; j++)
++            ff_jpeg2000_sigctxno_window_lut[j][i] =
++                ff_jpeg2000_sigctxno_lut[j][flag];
++    }
++    /* Cardinal neighbours: significance in bits 6/4/2/0, sign in 7/5/3/1. */
++    for (i = 0; i < 256; i++) {
++        int flag = ((i & 0x40) ? JPEG2000_T1_SIG_N : 0) |
++                   ((i & 0x10) ? JPEG2000_T1_SIG_W : 0) |
++                   ((i & 0x04) ? JPEG2000_T1_SIG_E : 0) |
++                   ((i & 0x01) ? JPEG2000_T1_SIG_S : 0) |
++                   ((i & 0x80) ? JPEG2000_T1_SGN_N : 0) |
++                   ((i & 0x20) ? JPEG2000_T1_SGN_W : 0) |
++                   ((i & 0x08) ? JPEG2000_T1_SGN_E : 0) |
++                   ((i & 0x02) ? JPEG2000_T1_SGN_S : 0);
++        uint8_t xorbit;
++        int ctxno = getsgnctxno(flag, &xorbit);
++
++        ff_jpeg2000_sgnctxno_packed_lut[i] = ctxno | (xorbit << 8);
++    }
+ }
+ 
+ void av_cold ff_jpeg2000_init_tier1_luts(void)
+@@ -164,28 +202,6 @@ void av_cold ff_jpeg2000_init_tier1_luts(void)
+     ff_thread_once(&init_static_once, jpeg2000_init_tier1_luts);
+ }
+ 
+-void ff_jpeg2000_set_significance(Jpeg2000T1Context *t1, int x, int y,
+-                                  int negative)
+-{
+-    x++;
+-    y++;
+-    t1->flags[(y) * t1->stride + x] |= JPEG2000_T1_SIG;
+-    if (negative) {
+-        t1->flags[(y) * t1->stride + x + 1] |= JPEG2000_T1_SIG_W | JPEG2000_T1_SGN_W;
+-        t1->flags[(y) * t1->stride + x - 1] |= JPEG2000_T1_SIG_E | JPEG2000_T1_SGN_E;
+-        t1->flags[(y + 1) * t1->stride + x] |= JPEG2000_T1_SIG_N | JPEG2000_T1_SGN_N;
+-        t1->flags[(y - 1) * t1->stride + x] |= JPEG2000_T1_SIG_S | JPEG2000_T1_SGN_S;
+-    } else {
+-        t1->flags[(y) * t1->stride + x + 1] |= JPEG2000_T1_SIG_W;
+-        t1->flags[(y) * t1->stride + x - 1] |= JPEG2000_T1_SIG_E;
+-        t1->flags[(y + 1) * t1->stride + x] |= JPEG2000_T1_SIG_N;
+-        t1->flags[(y - 1) * t1->stride + x] |= JPEG2000_T1_SIG_S;
+-    }
+-    t1->flags[(y + 1) * t1->stride + x + 1] |= JPEG2000_T1_SIG_NW;
+-    t1->flags[(y + 1) * t1->stride + x - 1] |= JPEG2000_T1_SIG_NE;
+-    t1->flags[(y - 1) * t1->stride + x + 1] |= JPEG2000_T1_SIG_SW;
+-    t1->flags[(y - 1) * t1->stride + x - 1] |= JPEG2000_T1_SIG_SE;
+-}
+ 
+ /* TODO: Implementation of quantization step not finished, see
+  * ISO/IEC 15444-1:2002 E.1 and A.6.4. */
+diff --git a/libavcodec/jpeg2000.h b/libavcodec/jpeg2000.h
+index 52c00f4268..82944d6f83 100644
+--- a/libavcodec/jpeg2000.h
++++ b/libavcodec/jpeg2000.h
+@@ -133,7 +133,10 @@ enum Jpeg2000Quantsty { // quantization style
+ 
+ typedef struct Jpeg2000T1Context {
+     int data[6144];
+-    uint16_t flags[6156];
++    union {
++        uint16_t flags[6156];   ///< a word per coefficient; the encoder
++        uint32_t flags32[3078]; ///< a word per stripe column; the decoder
++    };
+     MqcState mqc;
+     int stride;
+ } Jpeg2000T1Context;
+@@ -261,16 +264,37 @@ void ff_jpeg2000_init_tier1_luts(void);
+ 
+ /* Update significance of a coefficient at current position (x,y) and
+  * for neighbors. */
+-void ff_jpeg2000_set_significance(Jpeg2000T1Context *t1,
+-                                  int x, int y, int negative);
++static av_always_inline
++void ff_jpeg2000_set_significance(Jpeg2000T1Context *t1, int x, int y,
++                                  int negative)
++{
++    uint16_t *p = t1->flags + (y + 1) * t1->stride + x + 1;
++    /* The sign bits of the four edge neighbors are updated together; keeping
++     * the update branchless matters because the sign is close to random. */
++    unsigned sgn = (unsigned)-(negative != 0) &
++                   (JPEG2000_T1_SGN_N | JPEG2000_T1_SGN_S |
++                    JPEG2000_T1_SGN_W | JPEG2000_T1_SGN_E);
++
++    p[0]               |= JPEG2000_T1_SIG;
++    p[1]               |= JPEG2000_T1_SIG_W | (sgn & JPEG2000_T1_SGN_W);
++    p[-1]              |= JPEG2000_T1_SIG_E | (sgn & JPEG2000_T1_SGN_E);
++    p[t1->stride]      |= JPEG2000_T1_SIG_N | (sgn & JPEG2000_T1_SGN_N);
++    p[-t1->stride]     |= JPEG2000_T1_SIG_S | (sgn & JPEG2000_T1_SGN_S);
++    p[t1->stride + 1]  |= JPEG2000_T1_SIG_NW;
++    p[t1->stride - 1]  |= JPEG2000_T1_SIG_NE;
++    p[-t1->stride + 1] |= JPEG2000_T1_SIG_SW;
++    p[-t1->stride - 1] |= JPEG2000_T1_SIG_SE;
++}
+ 
+-extern uint8_t ff_jpeg2000_sigctxno_lut[256][4];
++extern uint8_t ff_jpeg2000_sigctxno_lut[4][256];
++extern uint8_t ff_jpeg2000_sigctxno_window_lut[4][512];
++extern uint16_t ff_jpeg2000_sgnctxno_packed_lut[256];
+ 
+ /* Get context label (number in range[0..8]) of a coefficient for significance
+  * propagation and cleanup coding passes. */
+ static inline int ff_jpeg2000_getsigctxno(int flag, int bandno)
+ {
+-    return ff_jpeg2000_sigctxno_lut[flag & 255][bandno];
++    return ff_jpeg2000_sigctxno_lut[bandno][flag & 255];
+ }
+ 
+ static const uint8_t refctxno_lut[2][2] = { { 14, 15 }, { 16, 16 } };
+@@ -282,14 +306,15 @@ static inline int ff_jpeg2000_getrefctxno(int flag)
+     return refctxno_lut[(flag >> 14) & 1][(flag & 255) != 0];
+ }
+ 
+-extern uint8_t ff_jpeg2000_sgnctxno_lut[16][16];
+-extern uint8_t ff_jpeg2000_xorbit_lut[16][16];
++extern uint8_t ff_jpeg2000_sgn_lut[16][16];
+ 
+-/* Get context label (number in range[9..13]) for sign decoding. */
++/* Context label (9..13) in the low nibble, XOR bit in bit 4. */
+ static inline int ff_jpeg2000_getsgnctxno(int flag, int *xorbit)
+ {
+-    *xorbit = ff_jpeg2000_xorbit_lut[flag & 15][(flag >> 8) & 15];
+-    return ff_jpeg2000_sgnctxno_lut[flag & 15][(flag >> 8) & 15];
++    int s = ff_jpeg2000_sgn_lut[flag & 15][(flag >> 8) & 15];
++
++    *xorbit = s >> 4;
++    return s & 15;
+ }
+ 
+ /* Node count of the tag-tree pyramid over a (w, h) leaf grid. */
+diff --git a/libavcodec/jpeg2000dec.c b/libavcodec/jpeg2000dec.c
+index a235edcec3..1efa04f9f5 100644
+--- a/libavcodec/jpeg2000dec.c
++++ b/libavcodec/jpeg2000dec.c
+@@ -25,13 +25,19 @@
+  * JPEG 2000 image decoder
+  */
+ 
++#include "config.h"
+ #include <inttypes.h>
+ #include <math.h>
+ 
++#if ARCH_AARCH64
++#include <arm_neon.h>
++#endif
++
+ #include "libavutil/attributes.h"
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
+ #include "libavutil/imgutils.h"
++#include "libavutil/intmath.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/pixdesc.h"
+@@ -1894,127 +1900,393 @@ static int jpeg2000_decode_packets(Jpeg2000DecoderContext *s, Jpeg2000Tile *tile
+ }
+ 
+ /* TIER-1 routines */
+-static void decode_sigpass(Jpeg2000T1Context *t1, int width, int height,
+-                           int bpno, int bandno,
+-                           int vert_causal_ctx_csty_symbol)
++/* Tier-1 passes over packed stripe-column flags.
++ *
++ * One 32-bit word describes a four-row column of the codeblock. Bits 0-17
++ * hold the significances of the 3x6 neighbourhood: bit 3*(row + 1) + (col + 1)
++ * is the significance of neighbour (row, col), row -1 being the last row of
++ * the stripe above and row 4 the first row of the stripe below. Bits 18-31
++ * hold the signs and the per-row marks: bit 18 the sign of the row above the
++ * stripe, bits 19 + 3*row, 20 + 3*row and 21 + 3*row the sign, refinement
++ * mark and visited mark of row `row`, and bit 31 the sign of the row below
++ * the stripe.
++ *
++ * Shifting a word right by 3*row aligns that row's 3x3 window on bits 0-8,
++ * so each context is a shift, a mask and one table load, and a coefficient
++ * that becomes significant updates three words instead of nine.
++ */
++
++#define J2K_T1_SIGMA_THIS       (1u << 4)
++#define J2K_T1_SIGMA_NEIGHBOURS 0x1EFu
++#define J2K_T1_MU_THIS          (1u << 20)
++#define J2K_T1_PI_THIS          (1u << 21)
++#define J2K_T1_PI_ALL           (J2K_T1_PI_THIS | (J2K_T1_PI_THIS << 3) | \
++                                 (J2K_T1_PI_THIS << 6) | (J2K_T1_PI_THIS << 9))
++#define J2K_T1_ROW_BITS         0x249u
++/* The row below the stripe, which a vertically causal context ignores. */
++#define J2K_T1_VSC_NEIGHBOURS   0x38000u
++#define J2K_T1_VSC_MASK         (~(J2K_T1_VSC_NEIGHBOURS | 0x80000000u))
++
++static av_always_inline uint32_t j2k_t1_uncoded_rows(uint32_t own)
+ {
+-    int mask = (3u << bpno)>>1, y0, x, y;
+-
+-    for (y0 = 0; y0 < height; y0 += 4)
+-        for (x = 0; x < width; x++)
+-            for (y = y0; y < height && y < y0 + 4; y++) {
+-                int flags_mask = -1;
+-                if (vert_causal_ctx_csty_symbol && y == y0 + 3)
+-                    flags_mask &= ~(JPEG2000_T1_SIG_S | JPEG2000_T1_SIG_SW | JPEG2000_T1_SIG_SE | JPEG2000_T1_SGN_S);
+-                if ((t1->flags[(y+1) * t1->stride + x+1] & JPEG2000_T1_SIG_NB & flags_mask)
+-                && !(t1->flags[(y+1) * t1->stride + x+1] & (JPEG2000_T1_SIG | JPEG2000_T1_VIS))) {
+-                    if (ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ff_jpeg2000_getsigctxno(t1->flags[(y+1) * t1->stride + x+1] & flags_mask, bandno))) {
+-                        int xorbit, ctxno = ff_jpeg2000_getsgnctxno(t1->flags[(y+1) * t1->stride + x+1] & flags_mask, &xorbit);
+-                        if (t1->mqc.raw) {
+-                            t1->data[(y) * t1->stride + x] |= (uint32_t)(ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ctxno)) << 31;
+-                            t1->data[(y) * t1->stride + x] |= mask;
+-                        } else {
+-                            t1->data[(y) * t1->stride + x] |= (uint32_t)(ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ctxno) ^ xorbit) << 31;
+-                            t1->data[(y) * t1->stride + x] |= mask;
+-                        }
+-                        ff_jpeg2000_set_significance(t1, x, y,
+-                                                     t1->data[(y) * t1->stride + x] & INT32_MIN);
+-                    }
+-                    t1->flags[(y + 1) * t1->stride + x + 1] |= JPEG2000_T1_VIS;
+-                }
+-            }
++    return ~((own >> 4) | (own >> 21)) & J2K_T1_ROW_BITS;
+ }
+ 
+-static void decode_refpass(Jpeg2000T1Context *t1, int width, int height,
+-                           int bpno, int vert_causal_ctx_csty_symbol)
++/* Rows that have a significant neighbour and were not visited yet. Bit 3*row
++ * marks row `row`; the neighbourhood terms are the west/centre/east of the
++ * row itself and of the row two below, plus the west/east of the row below,
++ * which is the eight neighbours without the centre. */
++static av_always_inline uint32_t j2k_t1_propagation_rows(uint32_t own)
+ {
+-    int phalf;
+-    int y0, x, y;
+-
+-    phalf = 1 << bpno;
+-
+-    for (y0 = 0; y0 < height; y0 += 4)
+-        for (x = 0; x < width; x++)
+-            for (y = y0; y < height && y < y0 + 4; y++)
+-                if ((t1->flags[(y + 1) * t1->stride + x + 1] & (JPEG2000_T1_SIG | JPEG2000_T1_VIS)) == JPEG2000_T1_SIG) {
+-                    int flags_mask = (vert_causal_ctx_csty_symbol && y == y0 + 3) ?
+-                        ~(JPEG2000_T1_SIG_S | JPEG2000_T1_SIG_SW | JPEG2000_T1_SIG_SE | JPEG2000_T1_SGN_S) : -1;
+-                    int ctxno = ff_jpeg2000_getrefctxno(t1->flags[(y + 1) * t1->stride + x + 1] & flags_mask);
+-                    t1->data[(y) * t1->stride + x] |= phalf >> 1;
+-                    if (ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ctxno))
+-                        t1->data[(y) * t1->stride + x] |= phalf;
+-                    else {
+-                        t1->data[(y) * t1->stride + x] &= ~(phalf);
++    uint32_t any_in_row = own | (own >> 1) | (own >> 2);
++    uint32_t neighbours = any_in_row | (any_in_row >> 6) |
++                          (own >> 3) | (own >> 5);
+ 
+-                    }
+-                    t1->flags[(y + 1) * t1->stride + x + 1] |= JPEG2000_T1_REF;
++    return neighbours & j2k_t1_uncoded_rows(own);
++}
++
++/* Record that the coefficient in row `shift / 3` of the column word at
++ * `index` became significant with `sign`. Setting the row's own bit also
++ * gives the row above its south neighbour and the row below its north
++ * neighbour, so only the two adjacent columns and a stripe edge need
++ * separate writes. */
++static av_always_inline void j2k_t1_set_significant(uint32_t *flags,
++                                                    uint32_t *own, int index,
++                                                    int stride, unsigned shift,
++                                                    unsigned sign)
++{
++    *own |= (J2K_T1_SIGMA_THIS | (sign << 19)) << shift;
++    flags[index - 1] |= (1u << 5) << shift;
++    flags[index + 1] |= (1u << 3) << shift;
++
++    if (!shift) {
++        int north = index - stride;
++
++        flags[north - 1] |= 1u << 17;
++        flags[north]     |= (1u << 16) | (sign << 31);
++        flags[north + 1] |= 1u << 15;
++    } else if (shift == 9) {
++        int south = index + stride;
++
++        flags[south - 1] |= 1u << 2;
++        flags[south]     |= (1u << 1) | (sign << 18);
++        flags[south + 1] |= 1u;
++    }
++}
++
++/* Sign context (9-13) in the low byte and the XOR bit above it, keyed by the
++ * cardinal neighbours' significances and signs. */
++static av_always_inline unsigned j2k_t1_sign_context(uint32_t own,
++                                                     uint32_t left,
++                                                     uint32_t right,
++                                                     unsigned shift, int vsc)
++{
++    uint32_t window = own, sgn_own = own;
++    unsigned significances, signs;
++
++    if (vsc && shift == 9) {
++        window  &= ~J2K_T1_VSC_NEIGHBOURS;
++        sgn_own &= J2K_T1_VSC_MASK;
++    }
++    /* Align the row's window on bits 0-8; the sign offsets below already
++     * carry `shift` because the signs live in the unshifted word. */
++    window >>= shift;
++    significances = (((window >> 1) & 1) << 6) |
++                    (((window >> 3) & 1) << 4) |
++                    (((window >> 5) & 1) << 2) | ((window >> 7) & 1);
++    /* Significances in bits 6/4/2/0 (N/W/E/S) and signs in 7/5/3/1, the key
++     * layout of the packed sign-context table; the north sign of a stripe's
++     * first row and the south sign of its last row are the stripe-edge bits. */
++    signs = (((sgn_own >> (shift ? 16 + shift : 18)) & 1) << 7) |
++            (((left    >> (19 + shift)) & 1) << 5) |
++            (((right   >> (19 + shift)) & 1) << 3) |
++            (((sgn_own >> (22 + shift)) & 1) << 1);
++
++    return ff_jpeg2000_sgnctxno_packed_lut[significances | signs];
++}
++
++static av_always_inline unsigned j2k_t1_zero_context(const uint8_t *lut,
++                                                     uint32_t own,
++                                                     unsigned shift, int vsc)
++{
++    if (vsc && shift == 9)
++        own &= ~J2K_T1_VSC_NEIGHBOURS;
++
++    return lut[(own >> shift) & J2K_T1_SIGMA_NEIGHBOURS];
++}
++
++static av_always_inline void decode_sigpass_core(Jpeg2000T1Context *t1,
++                                                 MqcState *mqc, int width,
++                                                 int height, int bpno,
++                                                 int bandno, int vsc)
++{
++    uint32_t *const flags = t1->flags32;
++    const int stride = t1->stride;
++    const unsigned mask = (3u << bpno) >> 1;
++    const uint32_t vsc_mask = vsc ? J2K_T1_VSC_MASK : ~0u;
++    const uint8_t *const ctxlut = ff_jpeg2000_sigctxno_window_lut[bandno];
++    int y0, x;
++
++    for (y0 = 0; y0 < height; y0 += 4) {
++        const int rows = FFMIN(height - y0, 4);
++        const uint32_t rows_mask = J2K_T1_ROW_BITS &
++                                   ((1u << (3 * rows)) - 1);
++        const int flag_base = ((y0 >> 2) + 1) * stride + 1;
++        int *const data = t1->data + y0 * stride;
++
++        for (x = 0; x < width; x++) {
++            const int fi = flag_base + x;
++            uint32_t own = flags[fi];
++            uint32_t candidates = j2k_t1_propagation_rows(own & vsc_mask) &
++                                  rows_mask;
++
++            if (!candidates)
++                continue;
++
++            do {
++                const unsigned shift = ff_ctz(candidates);
++                const unsigned ctxno = j2k_t1_zero_context(ctxlut, own,
++                                                           shift, vsc);
++
++                own |= J2K_T1_PI_THIS << shift;
++                if (ff_mqc_decode_inline(mqc, mqc->cx_states + ctxno)) {
++                    const unsigned sc = j2k_t1_sign_context(own,
++                                                            flags[fi - 1],
++                                                            flags[fi + 1],
++                                                            shift, vsc);
++                    unsigned sign = ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                         (sc & 0xff));
++
++                    if (!mqc->raw)
++                        sign ^= sc >> 8;
++                    data[(shift / 3) * stride + x] |= (sign << 31) | mask;
++                    j2k_t1_set_significant(flags, &own, fi, stride, shift,
++                                           sign);
++                    /* The new coefficient is a neighbour of the rows below. */
++                    candidates = j2k_t1_propagation_rows(own & vsc_mask) &
++                                 rows_mask & (~0u << (shift + 1));
++                } else {
++                    candidates &= candidates - 1;
+                 }
++            } while (candidates);
++
++            flags[fi] = own;
++        }
++    }
+ }
+ 
+-static void decode_clnpass(const Jpeg2000DecoderContext *s, Jpeg2000T1Context *t1,
+-                           int width, int height, int bpno, int bandno,
+-                           int seg_symbols, int vert_causal_ctx_csty_symbol)
++static void decode_sigpass(Jpeg2000T1Context *t1, MqcState *mqc,
++                           int width, int height,
++                           int bpno, int bandno,
++                           int vert_causal_ctx_csty_symbol)
++{
++    if (vert_causal_ctx_csty_symbol)
++        decode_sigpass_core(t1, mqc, width, height, bpno, bandno, 1);
++    else
++        decode_sigpass_core(t1, mqc, width, height, bpno, bandno, 0);
++}
++
++static av_always_inline void decode_refpass_core(Jpeg2000T1Context *t1,
++                                                 MqcState *mqc, int width,
++                                                 int height, int bpno,
++                                                 int vsc)
+ {
+-    int mask = (3u << bpno)>>1, y0, x, y, runlen, dec;
++    uint32_t *const flags = t1->flags32;
++    const int stride = t1->stride;
++    const int phalf = 1 << bpno;
++    const uint32_t vsc_mask = vsc ? J2K_T1_VSC_MASK : ~0u;
++    int y0, x;
+ 
+     for (y0 = 0; y0 < height; y0 += 4) {
++        const int rows = FFMIN(height - y0, 4);
++        const uint32_t rows_mask = J2K_T1_ROW_BITS &
++                                   ((1u << (3 * rows)) - 1);
++        const int flag_base = ((y0 >> 2) + 1) * stride + 1;
++        int *const data = t1->data + y0 * stride;
++
+         for (x = 0; x < width; x++) {
+-            int flags_mask = -1;
+-            if (vert_causal_ctx_csty_symbol)
+-                flags_mask &= ~(JPEG2000_T1_SIG_S | JPEG2000_T1_SIG_SW | JPEG2000_T1_SIG_SE | JPEG2000_T1_SGN_S);
+-            if (y0 + 3 < height &&
+-                !((t1->flags[(y0 + 1) * t1->stride + x + 1] & (JPEG2000_T1_SIG_NB | JPEG2000_T1_VIS | JPEG2000_T1_SIG)) ||
+-                  (t1->flags[(y0 + 2) * t1->stride + x + 1] & (JPEG2000_T1_SIG_NB | JPEG2000_T1_VIS | JPEG2000_T1_SIG)) ||
+-                  (t1->flags[(y0 + 3) * t1->stride + x + 1] & (JPEG2000_T1_SIG_NB | JPEG2000_T1_VIS | JPEG2000_T1_SIG)) ||
+-                  (t1->flags[(y0 + 4) * t1->stride + x + 1] & (JPEG2000_T1_SIG_NB | JPEG2000_T1_VIS | JPEG2000_T1_SIG) & flags_mask))) {
+-                if (!ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + MQC_CX_RL))
+-                    continue;
+-                runlen = ff_mqc_decode(&t1->mqc,
+-                                       t1->mqc.cx_states + MQC_CX_UNI);
+-                runlen = (runlen << 1) | ff_mqc_decode(&t1->mqc,
+-                                                       t1->mqc.cx_states +
+-                                                       MQC_CX_UNI);
+-                dec = 1;
+-            } else {
+-                runlen = 0;
+-                dec    = 0;
+-            }
++            const int fi = flag_base + x;
++            uint32_t own = flags[fi];
++            /* Significant before this bitplane's significance pass. */
++            uint32_t candidates = (own >> 4) & ~(own >> 21) & rows_mask;
++
++            if (!candidates)
++                continue;
++
++            do {
++                const unsigned shift = ff_ctz(candidates);
++                const uint32_t window = (own & vsc_mask) >> shift;
++                const unsigned ctxno = (window & J2K_T1_MU_THIS) ? 16 :
++                                       (window & J2K_T1_SIGMA_NEIGHBOURS) ?
++                                       15 : 14;
++                int *const coeff = &data[(shift / 3) * stride + x];
++
++                *coeff |= phalf >> 1;
++                if (ff_mqc_decode_inline(mqc, mqc->cx_states + ctxno))
++                    *coeff |= phalf;
++                else
++                    *coeff &= ~phalf;
++                own |= J2K_T1_MU_THIS << shift;
++                candidates &= candidates - 1;
++            } while (candidates);
++
++            flags[fi] = own;
++        }
++    }
++}
++
++static void decode_refpass(Jpeg2000T1Context *t1, MqcState *mqc,
++                           int width, int height,
++                           int bpno, int vert_causal_ctx_csty_symbol)
++{
++    if (vert_causal_ctx_csty_symbol)
++        decode_refpass_core(t1, mqc, width, height, bpno, 1);
++    else
++        decode_refpass_core(t1, mqc, width, height, bpno, 0);
++}
+ 
+-            for (y = y0 + runlen; y < y0 + 4 && y < height; y++) {
+-                int flags_mask = -1;
+-                if (vert_causal_ctx_csty_symbol && y == y0 + 3)
+-                    flags_mask &= ~(JPEG2000_T1_SIG_S | JPEG2000_T1_SIG_SW | JPEG2000_T1_SIG_SE | JPEG2000_T1_SGN_S);
+-                if (!dec) {
+-                    if (!(t1->flags[(y+1) * t1->stride + x+1] & (JPEG2000_T1_SIG | JPEG2000_T1_VIS))) {
+-                        dec = ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ff_jpeg2000_getsigctxno(t1->flags[(y+1) * t1->stride + x+1] & flags_mask,
+-                                                                                             bandno));
++static av_always_inline void
++decode_clnpass_core(const Jpeg2000DecoderContext *s,
++                    Jpeg2000T1Context *t1, MqcState *mqc,
++                    int width, int height, int bpno, int bandno,
++                    int seg_symbols, int vsc)
++{
++    uint32_t *const flags = t1->flags32;
++    const int stride = t1->stride;
++    const unsigned mask = (3u << bpno) >> 1;
++    const uint32_t vsc_mask = vsc ? J2K_T1_VSC_MASK : ~0u;
++    const uint8_t *const ctxlut = ff_jpeg2000_sigctxno_window_lut[bandno];
++    int y0, x;
++
++    for (y0 = 0; y0 < height; y0 += 4) {
++        const int rows = FFMIN(height - y0, 4);
++        const uint32_t rows_mask = J2K_T1_ROW_BITS &
++                                   ((1u << (3 * rows)) - 1);
++        const int flag_base = ((y0 >> 2) + 1) * stride + 1;
++        int *const data = t1->data + y0 * stride;
++
++        for (x = 0; x < width; ) {
++            const int fi = flag_base + x;
++            uint32_t own = flags[fi];
++            uint32_t candidates;
++
++            /* A zero word is a full column of insignificant, unvisited
++             * coefficients with zero contexts: the run-length case. */
++            if (rows_mask == J2K_T1_ROW_BITS && !(own & vsc_mask)) {
++                uint32_t run = 0, qe = 0;
++
++                if (!mqc->raw && !(mqc->cx_states[MQC_CX_RL] & 1)) {
++                    uint32_t renorm_floor =
++                        FFMAX((uint32_t)(mqc->c64 >> 48) + 1, 0x8000);
++
++                    qe  = ff_mqc_packed[mqc->cx_states[MQC_CX_RL]] & 0xffff;
++                    run = mqc->a > renorm_floor ?
++                          (mqc->a - renorm_floor) / qe : 0;
++                }
++                /* While the run-length context's MPS is a zero and it
++                 * decodes without renormalizing, every zero word decodes
++                 * that zero and changes nothing but A. */
++                if (run) {
++                    unsigned limit = FFMIN(run, (uint32_t)(width - x));
++                    unsigned cols  = 1;
++
++                    while (cols < limit && !(flags[fi + cols] & vsc_mask))
++                        cols++;
++                    mqc->a -= cols * qe;
++                    x += cols;
++                    continue;
++                }
++                if (!ff_mqc_decode_inline(mqc, mqc->cx_states + MQC_CX_RL)) {
++                    x++;
++                    continue;
++                }
++                {
++                    unsigned first = ff_mqc_decode_inline(mqc,
++                                                          mqc->cx_states +
++                                                          MQC_CX_UNI);
++                    unsigned shift, sc, sign;
++                    int row;
++
++                    first = (first << 1) |
++                            ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                 MQC_CX_UNI);
++                    shift = 3 * first;
++                    sc    = j2k_t1_sign_context(own, flags[fi - 1],
++                                                flags[fi + 1], shift, vsc);
++                    sign  = ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                 (sc & 0xff)) ^ (sc >> 8);
++                    data[first * stride + x] |= (sign << 31) | mask;
++                    j2k_t1_set_significant(flags, &own, fi, stride, shift,
++                                           sign);
++                    for (row = first + 1; row < 4; row++) {
++                        shift = 3 * row;
++                        if (!ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                  j2k_t1_zero_context(ctxlut,
++                                                                      own,
++                                                                      shift,
++                                                                      vsc)))
++                            continue;
++                        sc   = j2k_t1_sign_context(own, flags[fi - 1],
++                                                   flags[fi + 1], shift, vsc);
++                        sign = ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                    (sc & 0xff)) ^ (sc >> 8);
++                        data[row * stride + x] |= (sign << 31) | mask;
++                        j2k_t1_set_significant(flags, &own, fi, stride, shift,
++                                               sign);
+                     }
+                 }
+-                if (dec) {
+-                    int xorbit;
+-                    int ctxno = ff_jpeg2000_getsgnctxno(t1->flags[(y + 1) * t1->stride + x + 1] & flags_mask,
+-                                                        &xorbit);
+-                    t1->data[(y) * t1->stride + x] |= (uint32_t)(ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + ctxno) ^ xorbit) << 31;
+-                    t1->data[(y) * t1->stride + x] |= mask;
+-                    ff_jpeg2000_set_significance(t1, x, y, t1->data[(y) * t1->stride + x] & INT32_MIN);
++            } else {
++                candidates = j2k_t1_uncoded_rows(own) & rows_mask;
++                while (candidates) {
++                    const unsigned shift = ff_ctz(candidates);
++                    const unsigned ctxno = j2k_t1_zero_context(ctxlut, own,
++                                                               shift, vsc);
++
++                    if (ff_mqc_decode_inline(mqc, mqc->cx_states + ctxno)) {
++                        const unsigned sc =
++                            j2k_t1_sign_context(own, flags[fi - 1],
++                                                flags[fi + 1], shift, vsc);
++                        const unsigned sign =
++                            ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                 (sc & 0xff)) ^ (sc >> 8);
++
++                        data[(shift / 3) * stride + x] |= (sign << 31) | mask;
++                        j2k_t1_set_significant(flags, &own, fi, stride, shift,
++                                               sign);
++                    }
++                    candidates &= candidates - 1;
+                 }
+-                dec = 0;
+-                t1->flags[(y + 1) * t1->stride + x + 1] &= ~JPEG2000_T1_VIS;
+             }
++            flags[fi] = own & ~J2K_T1_PI_ALL;
++            x++;
+         }
+     }
++
+     if (seg_symbols) {
+-        int val;
+-        val = ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + MQC_CX_UNI);
+-        val = (val << 1) + ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + MQC_CX_UNI);
+-        val = (val << 1) + ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + MQC_CX_UNI);
+-        val = (val << 1) + ff_mqc_decode(&t1->mqc, t1->mqc.cx_states + MQC_CX_UNI);
++        int val = 0, i;
++
++        for (i = 0; i < 4; i++)
++            val = (val << 1) | ff_mqc_decode_inline(mqc, mqc->cx_states +
++                                                    MQC_CX_UNI);
+         if (val != 0xa)
+             av_log(s->avctx, AV_LOG_ERROR,
+                    "Segmentation symbol value incorrect\n");
+     }
+ }
+ 
++static void decode_clnpass(const Jpeg2000DecoderContext *s,
++                           Jpeg2000T1Context *t1, MqcState *mqc,
++                           int width, int height, int bpno, int bandno,
++                           int seg_symbols, int vert_causal_ctx_csty_symbol)
++{
++    if (vert_causal_ctx_csty_symbol)
++        decode_clnpass_core(s, t1, mqc, width, height, bpno, bandno,
++                            seg_symbols, 1);
++    else
++        decode_clnpass_core(s, t1, mqc, width, height, bpno, bandno,
++                            seg_symbols, 0);
++}
++
+ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *codsty,
+                        Jpeg2000T1Context *t1, Jpeg2000Cblk *cblk,
+                        int width, int height, int bandpos, uint8_t roi_shift, const int M_b)
+@@ -2024,6 +2296,7 @@ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *cod
+     int vert_causal_ctx_csty_symbol = codsty->cblk_style & JPEG2000_CBLK_VSC;
+     int term_cnt = 0;
+     int coder_type;
++    MqcState mqc;
+ 
+     av_assert0(width <= 1024U && height <= 1024U);
+     av_assert0(width*height <= 4096);
+@@ -2034,11 +2307,12 @@ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *cod
+     if (!cblk->length || !cblk->nonzerobits)
+         return 0;
+ 
+-    memset(t1->flags, 0, t1->stride * (height + 2) * sizeof(*t1->flags));
++    memset(t1->flags32, 0,
++           t1->stride * ((height + 3) / 4 + 2) * sizeof(*t1->flags32));
+ 
+     cblk->data[cblk->length] = 0xff;
+     cblk->data[cblk->length+1] = 0xff;
+-    ff_mqc_initdec(&t1->mqc, cblk->data, 0, 1);
++    ff_mqc_initdec(&mqc, cblk->data, 0, 1);
+ 
+     while (passno--) {
+         if (bpno < -1 || bpno > 29) {
+@@ -2047,34 +2321,37 @@ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *cod
+         }
+         switch(pass_t) {
+         case 0:
+-            decode_sigpass(t1, width, height, bpno + 1, bandpos,
++            decode_sigpass(t1, &mqc, width, height, bpno + 1, bandpos,
+                            vert_causal_ctx_csty_symbol);
+             break;
+         case 1:
+-            decode_refpass(t1, width, height, bpno + 1, vert_causal_ctx_csty_symbol);
++            decode_refpass(t1, &mqc, width, height, bpno + 1,
++                           vert_causal_ctx_csty_symbol);
+             break;
+         case 2:
+-            av_assert2(!t1->mqc.raw);
+-            decode_clnpass(s, t1, width, height, bpno + 1, bandpos,
++            av_assert2(!mqc.raw);
++            decode_clnpass(s, t1, &mqc, width, height, bpno + 1, bandpos,
+                            codsty->cblk_style & JPEG2000_CBLK_SEGSYM,
+                            vert_causal_ctx_csty_symbol);
+             break;
+         }
+         if (codsty->cblk_style & JPEG2000_CBLK_RESET) // XXX no testcase for just this
+-            ff_mqc_init_contexts(&t1->mqc);
++            ff_mqc_init_contexts(&mqc);
+ 
+         if (passno && (coder_type = needs_termination(codsty->cblk_style, pass_cnt))) {
+             if (term_cnt >= cblk->nb_terminations) {
+                 av_log(s->avctx, AV_LOG_ERROR, "Missing needed termination \n");
+                 return AVERROR_INVALIDDATA;
+             }
+-            if (FFABS(cblk->data + cblk->data_start[term_cnt + 1] - 2 - t1->mqc.bp) > 0) {
++            if (FFABS(cblk->data + cblk->data_start[term_cnt + 1] - 2 -
++                      mqc.bp) > 0) {
+                 av_log(s->avctx, AV_LOG_WARNING, "Mid mismatch %td in pass %d of %d\n",
+-                    cblk->data + cblk->data_start[term_cnt + 1] - 2 - t1->mqc.bp,
++                    cblk->data + cblk->data_start[term_cnt + 1] - 2 - mqc.bp,
+                     pass_cnt, cblk->npasses);
+             }
+ 
+-            ff_mqc_initdec(&t1->mqc, cblk->data + cblk->data_start[++term_cnt], coder_type == 2, 0);
++            ff_mqc_initdec(&mqc, cblk->data + cblk->data_start[++term_cnt],
++                           coder_type == 2, 0);
+         }
+ 
+         pass_t++;
+@@ -2085,20 +2362,27 @@ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *cod
+         pass_cnt ++;
+     }
+ 
+-    if (cblk->data + cblk->length - 2 > t1->mqc.bp) {
++    if (cblk->data + cblk->length - 2 > mqc.bp) {
+         av_log(s->avctx, AV_LOG_WARNING, "End mismatch %td\n",
+-               cblk->data + cblk->length - 2 - t1->mqc.bp);
++               cblk->data + cblk->length - 2 - mqc.bp);
+     }
+ 
+-    if (cblk->data + cblk->length < t1->mqc.bp) {
++    if (cblk->data + cblk->length < mqc.bp) {
+         av_log(s->avctx, AV_LOG_WARNING, "Synthetic End of Stream Marker Read.\n");
+     }
+ 
++    /* Without ROI the pass below rewrites every coefficient with its own
++     * value; the samples are already in the form the DWT expects. */
++    if (!roi_shift)
++        return 1;
++
+     /* Reconstruct the sample values */
++    /* Bit mask for ROI detection */
++    const uint32_t mask = (int64_t)UINT32_MAX >> (M_b + 1);
++
+     for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+             int32_t sign, n, val;
+-            const uint32_t mask  = (int64_t)UINT32_MAX >> (M_b + 1); // bit mask for ROI detection
+ 
+             n = x + (y * t1->stride);
+             val = t1->data[n];
+@@ -2107,7 +2391,8 @@ static int decode_cblk(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *cod
+             /* ROI shift, if necessary */
+             if (roi_shift && (((uint32_t)val & ~mask) == 0))
+                 val = (uint32_t)val << roi_shift;
+-            t1->data[n] = val | sign; /* NOTE: Binary point for reconstruction value is located in 31 - M_b */
++            /* NOTE: binary point of the reconstruction value is at 31 - M_b */
++            t1->data[n] = val | sign;
+         }
+     }
+     return 1;
+@@ -2393,6 +2678,179 @@ WRITE_FRAME(16, uint16_t)
+ 
+ #undef WRITE_FRAME
+ 
++static av_always_inline void ict_float_pixel(float s0, float s1, float s2,
++                                             int off, int max, int shift,
++                                             uint16_t *d0, uint16_t *d1,
++                                             uint16_t *d2)
++{
++    const float i0 = s0 + 1.402f * s2;
++    const float i1 = s0 - 0.34413f * s1 - 0.71414f * s2;
++    const float i2 = s0 + 1.772f * s1;
++
++    *d0 = av_clip(lrintf(i0) + off, 0, max) << shift;
++    *d1 = av_clip(lrintf(i1) + off, 0, max) << shift;
++    *d2 = av_clip(lrintf(i2) + off, 0, max) << shift;
++}
++
++static void ict_float_row_scalar(const float *s0, const float *s1,
++                                 const float *s2, uint16_t *dst, int w,
++                                 int off, int max, int shift,
++                                 int p0, int p1, int p2)
++{
++    int x;
++
++    for (x = 0; x < w; x++) {
++        ict_float_pixel(s0[x], s1[x], s2[x], off, max, shift,
++                        dst + p0, dst + p1, dst + p2);
++        dst += 3;
++    }
++}
++
++#if ARCH_AARCH64
++static void ict_float_row_neon(const float *s0, const float *s1,
++                               const float *s2, uint16_t *dst, int w,
++                               int off, int max, int shift)
++{
++    const float32x4_t c0 = vdupq_n_f32(1.402f);
++    const float32x4_t c1 = vdupq_n_f32(-0.34413f);
++    const float32x4_t c2 = vdupq_n_f32(-0.71414f);
++    const float32x4_t c3 = vdupq_n_f32(1.772f);
++    const int32x4_t vzero = vdupq_n_s32(0);
++    const int32x4_t voff  = vdupq_n_s32(off);
++    const int32x4_t vmax  = vdupq_n_s32(max);
++    const int32x4_t vshift = vdupq_n_s32(shift);
++    int x;
++
++    for (x = 0; x + 8 <= w; x += 8) {
++        const float32x4_t a0 = vld1q_f32(s0 + x);
++        const float32x4_t a1 = vld1q_f32(s1 + x);
++        const float32x4_t a2 = vld1q_f32(s2 + x);
++        const float32x4_t b0 = vld1q_f32(s0 + x + 4);
++        const float32x4_t b1 = vld1q_f32(s1 + x + 4);
++        const float32x4_t b2 = vld1q_f32(s2 + x + 4);
++        float32x4_t i0a = vfmaq_f32(a0, a2, c0);
++        float32x4_t i1a = vfmaq_f32(a0, a1, c1);
++        float32x4_t i2a = vfmaq_f32(a0, a1, c3);
++        float32x4_t i0b = vfmaq_f32(b0, b2, c0);
++        float32x4_t i1b = vfmaq_f32(b0, b1, c1);
++        float32x4_t i2b = vfmaq_f32(b0, b1, c3);
++        int32x4_t o0a, o0b, o1a, o1b, o2a, o2b;
++        uint16x8_t u0, u1, u2;
++        uint16x8x3_t out;
++
++        i1a = vfmaq_f32(i1a, a2, c2);
++        i1b = vfmaq_f32(i1b, b2, c2);
++
++        o0a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i0a), voff), vzero), vmax), vshift);
++        o0b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i0b), voff), vzero), vmax), vshift);
++        o1a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i1a), voff), vzero), vmax), vshift);
++        o1b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i1b), voff), vzero), vmax), vshift);
++        o2a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i2a), voff), vzero), vmax), vshift);
++        o2b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i2b), voff), vzero), vmax), vshift);
++
++        u0 = vcombine_u16(vqmovun_s32(o0a), vqmovun_s32(o0b));
++        u1 = vcombine_u16(vqmovun_s32(o1a), vqmovun_s32(o1b));
++        u2 = vcombine_u16(vqmovun_s32(o2a), vqmovun_s32(o2b));
++        out.val[0] = u0;
++        out.val[1] = u1;
++        out.val[2] = u2;
++        vst3q_u16(dst, out);
++        dst += 24;
++    }
++
++    for (; x < w; x++) {
++        ict_float_pixel(s0[x], s1[x], s2[x], off, max, shift,
++                        dst, dst + 1, dst + 2);
++        dst += 3;
++    }
++}
++#endif
++
++/* Output for a packed format whose three components share one geometry: a
++ * single interleaved pass over the frame instead of three strided ones.
++ * With mct set, the inverse ICT is applied in the same pass. */
++static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
++                                  Jpeg2000Tile *tile, AVFrame *picture,
++                                  int precision, int mct)
++{
++    Jpeg2000Component *comp = tile->comp;
++    const int cbps  = s->cbps[0];
++    const int shift = precision - cbps;
++    const int off   = 1 << (cbps - 1);
++    const int max   = (1 << cbps) - 1;
++    const int w = comp[0].coord[0][1] -
++                  ff_jpeg2000_ceildiv(s->image_offset_x, s->cdx[0]);
++    const int h = comp[0].coord[1][1] -
++                  ff_jpeg2000_ceildiv(s->image_offset_y, s->cdy[0]);
++    /* Component placement of the per-component path. */
++    const int p0 = s->cdef[0] ? s->cdef[0] - 1 : 0;
++    const int p1 = s->cdef[1] ? s->cdef[1] - 1 : 1;
++    const int p2 = s->cdef[2] ? s->cdef[2] - 1 : 2;
++    const int identity = p0 == 0 && p1 == 1 && p2 == 2;
++    int x, y;
++
++    for (y = 0; y < h; y++) {
++        const float *d0 = comp[0].f_data + (ptrdiff_t)y * w;
++        const float *d1 = comp[1].f_data + (ptrdiff_t)y * w;
++        const float *d2 = comp[2].f_data + (ptrdiff_t)y * w;
++        uint16_t *dst = (uint16_t *)picture->data[0] +
++                        (ptrdiff_t)y * (picture->linesize[0] / 2);
++
++        if (mct) {
++            if (identity) {
++#if ARCH_AARCH64
++                ict_float_row_neon(d0, d1, d2, dst, w, off, max, shift);
++#else
++                ict_float_row_scalar(d0, d1, d2, dst, w, off, max, shift,
++                                     0, 1, 2);
++#endif
++            } else {
++                ict_float_row_scalar(d0, d1, d2, dst, w, off, max, shift,
++                                     p0, p1, p2);
++            }
++            continue;
++        }
++
++        for (x = 0; x < w; x++) {
++            dst[p0] = av_clip(lrintf(d0[x]) + off, 0, max) << shift;
++            dst[p1] = av_clip(lrintf(d1[x]) + off, 0, max) << shift;
++            dst[p2] = av_clip(lrintf(d2[x]) + off, 0, max) << shift;
++            dst += 3;
++        }
++    }
++}
++
++static int can_write_packed(const Jpeg2000DecoderContext *s,
++                            const Jpeg2000Tile *tile)
++{
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(s->avctx->pix_fmt);
++    const Jpeg2000Component *c0 = tile->comp;
++    int compno;
++
++    if (s->ncomponents != 3 || s->precision <= 8 || !desc)
++        return 0;
++    if ((desc->flags & AV_PIX_FMT_FLAG_PLANAR) || desc->nb_components != 3)
++        return 0;
++    if (c0->coord[0][0] != ff_jpeg2000_ceildiv(s->image_offset_x, s->cdx[0]) ||
++        c0->coord[1][0] != ff_jpeg2000_ceildiv(s->image_offset_y, s->cdy[0]))
++        return 0;
++    for (compno = 0; compno < 3; compno++) {
++        const Jpeg2000Component *c = tile->comp + compno;
++        const Jpeg2000CodingStyle *cs = tile->codsty + compno;
++
++        if (cs->transform != FF_DWT97 || s->cbps[compno] != s->cbps[0])
++            return 0;
++        if (c->coord[0][0] != c0->coord[0][0] ||
++            c->coord[0][1] != c0->coord[0][1] ||
++            c->coord[1][0] != c0->coord[1][0] ||
++            c->coord[1][1] != c0->coord[1][1])
++            return 0;
++        if (s->cdx[compno] != s->cdx[0] || s->cdy[compno] != s->cdy[0])
++            return 0;
++    }
++    return 1;
++}
++
+ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
+                                 int jobnr, int threadnr)
+ {
+@@ -2404,19 +2862,28 @@ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
+     if (ret < 0)
+         return ret;
+ 
+-    /* inverse MCT transformation */
+-    if (tile->codsty[0].mct)
+-        mct_decode(s, tile);
+-
+     if (s->precision <= 8) {
++        /* inverse MCT transformation */
++        if (tile->codsty[0].mct)
++            mct_decode(s, tile);
++
+         write_frame_8(s, tile, picture, 8);
+     } else {
+         int precision = picture->format == AV_PIX_FMT_XYZ12 ||
+                         picture->format == AV_PIX_FMT_RGB48 ||
+                         picture->format == AV_PIX_FMT_RGBA64 ||
+                         picture->format == AV_PIX_FMT_GRAY16 ? 16 : s->precision;
++        const int packed = can_write_packed(s, tile);
+ 
+-        write_frame_16(s, tile, picture, precision);
++        /* The packed writer applies the inverse ICT in the output pass. */
++        if (tile->codsty[0].mct && !packed)
++            mct_decode(s, tile);
++
++        if (packed)
++            write_frame_16_packed(s, tile, picture, precision,
++                                  tile->codsty[0].mct);
++        else
++            write_frame_16(s, tile, picture, precision);
+     }
+ 
+     return 0;
+diff --git a/libavcodec/jpeg2000dsp.c b/libavcodec/jpeg2000dsp.c
+index 2931a38ef1..2807e49771 100644
+--- a/libavcodec/jpeg2000dsp.c
++++ b/libavcodec/jpeg2000dsp.c
+@@ -96,7 +96,9 @@ av_cold void ff_jpeg2000dsp_init(Jpeg2000DSPContext *c)
+     c->mct_decode[FF_DWT53]     = rct_int;
+     c->mct_decode[FF_DWT97_INT] = ict_int;
+ 
+-#if ARCH_RISCV
++#if ARCH_AARCH64
++    ff_jpeg2000dsp_init_aarch64(c);
++#elif ARCH_RISCV
+     ff_jpeg2000dsp_init_riscv(c);
+ #elif ARCH_X86 && HAVE_X86ASM
+     ff_jpeg2000dsp_init_x86(c);
+diff --git a/libavcodec/jpeg2000dsp.h b/libavcodec/jpeg2000dsp.h
+index 6854c7762d..f50fee710c 100644
+--- a/libavcodec/jpeg2000dsp.h
++++ b/libavcodec/jpeg2000dsp.h
+@@ -33,6 +33,7 @@ typedef struct Jpeg2000DSPContext {
+ extern const float ff_jpeg2000_f_ict_params[4];
+ 
+ void ff_jpeg2000dsp_init(Jpeg2000DSPContext *c);
++void ff_jpeg2000dsp_init_aarch64(Jpeg2000DSPContext *c);
+ void ff_jpeg2000dsp_init_riscv(Jpeg2000DSPContext *c);
+ void ff_jpeg2000dsp_init_x86(Jpeg2000DSPContext *c);
+ 
+diff --git a/libavcodec/jpeg2000dwt.c b/libavcodec/jpeg2000dwt.c
+index 9ee8122658..4fd274abaa 100644
+--- a/libavcodec/jpeg2000dwt.c
++++ b/libavcodec/jpeg2000dwt.c
+@@ -25,6 +25,8 @@
+  * Discrete wavelet transform
+  */
+ 
++#include <string.h>
++
+ #include "libavutil/error.h"
+ #include "libavutil/macros.h"
+ #include "libavutil/mem.h"
+@@ -37,6 +39,12 @@
+ #define F_LFTG_GAMMA  0.882911075530934f
+ #define F_LFTG_DELTA  0.443506852043971f
+ 
++/* Block width of the transposed scratch used by the 9/7 float vertical
++ * synthesis: 16 floats per row is one full cache line and exactly four
++ * 128-bit vectors, so every lifting step runs as row-wise SIMD across the
++ * block while each column keeps the scalar evaluation order (bit-exact). */
++#define F_DWT_BLOCK 16
++
+ /* Lifting parameters in integer format.
+  * Computed as param = (float param) * (1 << 16) */
+ #define I_LFTG_ALPHA_PRIME   38413ll // = 103949 - 65536, (= alpha - 1.0)
+@@ -375,8 +383,6 @@ static void dwt_decode53(DWTContext *s, int *t)
+ 
+ static void sr_1d97_float(float *p, int i0, int i1)
+ {
+-    int i;
+-
+     if (i1 <= i0 + 1) {
+         if (i0 == 1)
+             p[1] *= F_LFTG_K/2;
+@@ -387,17 +393,179 @@ static void sr_1d97_float(float *p, int i0, int i1)
+ 
+     extend97_float(p, i0, i1);
+ 
+-    for (i = (i0 >> 1) - 1; i < (i1 >> 1) + 2; i++)
+-        p[2 * i]     -= F_LFTG_DELTA * (p[2 * i - 1] + p[2 * i + 1]);
+-    /* step 4 */
+-    for (i = (i0 >> 1) - 1; i < (i1 >> 1) + 1; i++)
+-        p[2 * i + 1] -= F_LFTG_GAMMA * (p[2 * i]     + p[2 * i + 2]);
+-    /*step 5*/
+-    for (i = (i0 >> 1); i < (i1 >> 1) + 1; i++)
+-        p[2 * i]     += F_LFTG_BETA  * (p[2 * i - 1] + p[2 * i + 1]);
+-    /* step 6 */
+-    for (i = (i0 >> 1); i < (i1 >> 1); i++)
+-        p[2 * i + 1] += F_LFTG_ALPHA * (p[2 * i]     + p[2 * i + 2]);
++    /* Steps 1+2 fused in one ascending pass. Step 1 writes E1[i] and step 2
++     * reads E1[i] and E1[i+1], so O2[i-1] can be emitted as soon as E1[i] is
++     * known; the original O[i-1] is carried from the previous iteration
++     * because its slot has already been overwritten by then. Each pass now
++     * touches every element once instead of twice, and the operands and
++     * evaluation order are unchanged, so the result is bit-identical. */
++    const int lo = (i0 >> 1) - 1, hi = i1 >> 1;
++    float op = p[2 * lo - 1], e1p = 0.0f;
++    int i;
++
++    for (i = lo; i < hi + 2; i++) {
++        float o1 = p[2 * i + 1];
++        float e1 = p[2 * i] - F_LFTG_DELTA * (op + o1);
++
++        p[2 * i] = e1;
++        if (i > lo)
++            p[2 * i - 1] = op - F_LFTG_GAMMA * (e1p + e1);
++
++        op   = o1;
++        e1p  = e1;
++    }
++
++    /* Steps 3+4 fused the same way, reading back E1 and O2. */
++    const int lo3 = i0 >> 1, hi3 = i1 >> 1;
++    float o2p = p[2 * lo3 - 1], e3p = 0.0f;
++
++    for (i = lo3; i < hi3 + 1; i++) {
++        float o2c = p[2 * i + 1];
++        float e3  = p[2 * i] + F_LFTG_BETA * (o2p + o2c);
++
++        p[2 * i] = e3;
++        if (i > lo3)
++            p[2 * i - 1] = o2p + F_LFTG_ALPHA * (e3p + e3);
++
++        o2p = o2c;
++        e3p = e3;
++    }
++}
++
++/* Vertical 9/7 synthesis for full blocks of F_DWT_BLOCK consecutive columns.
++ *
++ * One fused descending wavefront replaces the former gather + four lifting
++ * passes + scatter. p[] is the virtual interleaved signal of the scalar path:
++ * p[i0-4 .. i1+3], i0 = mv, i1 = mv + lv, with p[2i] the even and p[2i+1] the
++ * odd polyphase stream. Iteration i computes E3[i] (p[2i]) and O4[i]
++ * (p[2i+1]) from the three input values p[2i-3 .. 2i-1], carrying E1[i],
++ * O2[i] and E3[i+1] in registers, so each p[] value is loaded once and each
++ * output row written once. The arithmetic, evaluation order and boundary
++ * mirroring are identical to extend97_float + sr_1d97_float + the scalar
++ * scatter, so the output is bit-identical to the per-column pass.
++ *
++ * p[q] is stored at data row q - i0 on output, while its input lives at the
++ * scalar gather's row (q-i0 even: (q-i0)/2, odd: E+(q-i0-1)/2). Only the
++ * high-subband rows (data rows E..lv-1) need copying to scratch first: an
++ * output write can hit a high row before that row is read, whereas a low row
++ * r is read at iteration r+1 and written at iteration <= r, i.e. always read
++ * first. The eight boundary slots p[i0-4..i0-1] and p[i1..i1+3] also live in
++ * scratch and are initialized exactly as extend97_float does.
++ *
++ * Returns the number of columns processed (multiple of F_DWT_BLOCK). */
++static inline const float *dwt97_ver_src(const float *base, const float *scr,
++                                         int w, int i0, int E, int q)
++{
++    /* scalar gather: low rows at even p (p[2mv+2j], j = q/2 - mv), high
++     * rows at odd p (p[1+2(j-E)]), independent of the parity of mv */
++    int r = (q & 1) ? E + (q >> 1) : (q >> 1) - i0;
++
++    return r < E ? base + (size_t)r * w
++                 : scr + (size_t)(r - E) * F_DWT_BLOCK;
++}
++
++static void dwt97_ver_load(float *dst, const float *base, const float *scr,
++                           const float *mir, int w, int i0, int i1, int E,
++                           int q)
++{
++    if (q < i0)
++        memcpy(dst, mir + (size_t)(q - i0 + 4) * F_DWT_BLOCK,
++               F_DWT_BLOCK * sizeof(float));
++    else if (q >= i1)
++        memcpy(dst, mir + (size_t)(4 + q - i1) * F_DWT_BLOCK,
++               F_DWT_BLOCK * sizeof(float));
++    else
++        memcpy(dst, dwt97_ver_src(base, scr, w, i0, E, q),
++               F_DWT_BLOCK * sizeof(float));
++}
++
++static int dwt_decode97_float_ver_block(DWTContext *s, float *data, int w,
++                                        int lv, int mv, int lh)
++{
++    const int i0 = mv, i1 = mv + lv;
++    const int E = (lv - mv + 1) >> 1;
++    const int O = lv - E;
++    const int lo  = (i0 >> 1) - 1;   /* step 1/2 lower bound */
++    const int hi1 = (i1 >> 1) + 1;   /* step 1 upper bound */
++    const int hi2 =  i1 >> 1;        /* step 2/3 upper bound */
++    const int hi4 = hi2 - 1;         /* step 4 upper bound */
++    const int st3 =  i0 >> 1;        /* step 3/4 lower bound */
++    float *scr = s->f_blockbuf;
++    float *mir;
++    int lp0, i, k;
++
++    if (!s->f_blockbuf)
++        return 0;
++
++    mir = scr + (size_t)O * F_DWT_BLOCK;
++
++    for (lp0 = 0; lp0 + F_DWT_BLOCK <= lh; lp0 += F_DWT_BLOCK) {
++        const float *base = data + lp0;
++        float e1c[F_DWT_BLOCK], e1n[F_DWT_BLOCK];
++        float o2c[F_DWT_BLOCK], o2p[F_DWT_BLOCK];
++        float e3h[F_DWT_BLOCK], e3c[F_DWT_BLOCK];
++        float o4c[F_DWT_BLOCK];
++        float va[F_DWT_BLOCK], vb[F_DWT_BLOCK], vc[F_DWT_BLOCK];
++
++        /* high-subband rows: output writes can clobber these before they
++         * are read, low rows are always read before they are written */
++        for (i = E; i < lv; i++)
++            memcpy(scr + (size_t)(i - E) * F_DWT_BLOCK,
++                   base + (size_t)i * w, F_DWT_BLOCK * sizeof(float));
++
++        /* boundary mirroring, identical to extend97_float */
++        for (i = 1; i <= 4; i++) {
++            dwt97_ver_load(mir + (size_t)(4 - i) * F_DWT_BLOCK, base, scr,
++                           mir, w, i0, i1, E, i0 + i);
++            dwt97_ver_load(mir + (size_t)(3 + i) * F_DWT_BLOCK, base, scr,
++                           mir, w, i0, i1, E, i1 - i - 1);
++        }
++
++        /* E1[hi1], step 1's first value */
++        dwt97_ver_load(va, base, scr, mir, w, i0, i1, E, 2 * hi1 - 1);
++        dwt97_ver_load(vb, base, scr, mir, w, i0, i1, E, 2 * hi1);
++        dwt97_ver_load(vc, base, scr, mir, w, i0, i1, E, 2 * hi1 + 1);
++        for (k = 0; k < F_DWT_BLOCK; k++)
++            e1c[k] = vb[k] - F_LFTG_DELTA * (va[k] + vc[k]);
++        memset(e3h, 0, sizeof(e3h));
++
++        for (i = hi1; i >= lo; i--) {
++            if (i > lo) {
++                /* E1[i-1] and O2[i-1] */
++                dwt97_ver_load(va, base, scr, mir, w, i0, i1, E, 2 * i - 3);
++                dwt97_ver_load(vb, base, scr, mir, w, i0, i1, E, 2 * i - 2);
++                dwt97_ver_load(vc, base, scr, mir, w, i0, i1, E, 2 * i - 1);
++                for (k = 0; k < F_DWT_BLOCK; k++)
++                    e1n[k] = vb[k] - F_LFTG_DELTA * (va[k] + vc[k]);
++                for (k = 0; k < F_DWT_BLOCK; k++)
++                    o2p[k] = vc[k] - F_LFTG_GAMMA * (e1n[k] + e1c[k]);
++            }
++            /* E3[i] and O4[i], same ranges as the scalar steps 3 and 4 */
++            if (i >= st3 && i <= hi2)
++                for (k = 0; k < F_DWT_BLOCK; k++)
++                    e3c[k] = e1c[k] + F_LFTG_BETA * (o2p[k] + o2c[k]);
++            if (i >= st3 && i <= hi4)
++                for (k = 0; k < F_DWT_BLOCK; k++)
++                    o4c[k] = o2c[k] + F_LFTG_ALPHA * (e3c[k] + e3h[k]);
++
++            /* scatter: output row q - i0, rows outside the signal are the
++             * scalar pass's mirror slots and are not written */
++            if (2 * i >= i0 && 2 * i < i1)
++                memcpy(data + (size_t)(2 * i - i0) * w + lp0, e3c,
++                       F_DWT_BLOCK * sizeof(float));
++            if (2 * i + 1 >= i0 && 2 * i + 1 < i1)
++                memcpy(data + (size_t)(2 * i + 1 - i0) * w + lp0, o4c,
++                       F_DWT_BLOCK * sizeof(float));
++
++            if (i > lo) {
++                memcpy(e1c, e1n, sizeof(e1c));
++                memcpy(o2c, o2p, sizeof(o2c));
++            }
++            if (i >= st3 && i <= hi2)
++                memcpy(e3h, e3c, sizeof(e3h));
++        }
++    }
++    return lp0;
+ }
+ 
+ static void dwt_decode97_float(DWTContext *s, float *t)
+@@ -414,27 +582,76 @@ static void dwt_decode97_float(DWTContext *s, float *t)
+             lv = s->linelen[lev][1],
+             mh = s->mod[lev][0],
+             mv = s->mod[lev][1],
+-            lp;
++            lp, lpt;
+         float *l;
+         // HOR_SD
+         l = line + mh;
+         for (lp = 0; lp < lv; lp++) {
+-            int i, j = 0;
+-            // copy with interleaving
+-            for (i = mh; i < lh; i += 2, j++)
+-                l[i] = data[w * lp + j];
+-            for (i = 1 - mh; i < lh; i += 2, j++)
+-                l[i] = data[w * lp + j];
++            /* copy with interleaving, fused into one loop. mh is 0 or 1: the
++             * first original loop (l[mh + 2j], count c1) reads the row's first
++             * c1 samples, the second (l[1 - mh + 2j], count c2) continues at
++             * c1. When mh == 1 the two streams swap which line parity they
++             * land on; swapping the source offsets instead keeps the line
++             * positions a statically adjacent pair (2j, 2j+1) so the compiler
++             * can emit interleaved stores instead of per-lane scatters. The
++             * values are moved unmodified, so this is bit-exact by
++             * construction. */
++            int j, c1 = (lh - mh + 1) >> 1, c2 = (lh + mh) >> 1;
++            int eoff = mh ? c1 : 0, ooff = mh ? 0 : c1;
++            int cE = mh ? c2 : c1, cO = mh ? c1 : c2;
++            const int cmin = FFMIN(cE, cO);
++            const float *restrict src = data + (size_t)w * lp;
++            const float *restrict srcE = src + eoff;
++            const float *restrict srcO = src + ooff;
++            float *restrict dst = l;
++
++            /* Four index pairs per iteration: the two loads become one
++             * 128-bit load per source, and the two interleaved stores one
++             * 256-bit store, so the permutation runs at memory speed
++             * instead of one scalar load/store pair per coefficient. */
++            for (j = 0; j + 4 <= cmin; j += 4) {
++                float e0 = srcE[j], e1 = srcE[j + 1];
++                float e2 = srcE[j + 2], e3 = srcE[j + 3];
++                float o0 = srcO[j], o1 = srcO[j + 1];
++                float o2 = srcO[j + 2], o3 = srcO[j + 3];
++
++                dst[2 * j]      = e0;
++                dst[2 * j + 1]  = o0;
++                dst[2 * j + 2]  = e1;
++                dst[2 * j + 3]  = o1;
++                dst[2 * j + 4]  = e2;
++                dst[2 * j + 5]  = o2;
++                dst[2 * j + 6]  = e3;
++                dst[2 * j + 7]  = o3;
++            }
++            for (; j < cmin; j++) {
++                dst[2 * j]     = srcE[j];
++                dst[2 * j + 1] = srcO[j];
++            }
++            for (; j < cE; j++)
++                dst[2 * j] = srcE[j];
++            for (; j < cO; j++)
++                dst[2 * j + 1] = srcO[j];
+ 
+             sr_1d97_float(line, mh, mh + lh);
+ 
+-            for (i = 0; i < lh; i++)
+-                data[w * lp + i] = l[i];
++            /* The lifted line is moved back unchanged; memcpy lets the
++             * compiler emit a vector copy instead of an aliasing-limited
++             * scalar loop. */
++            memcpy(data + (size_t)w * lp, l, (size_t)lh * sizeof(float));
+         }
+ 
+         // VER_SD
++        /* Full blocks of columns go through the transposed scratch:
++         * rows of F_DWT_BLOCK consecutive columns, lifted row-wise.
++         * Arithmetic per column is identical to the scalar path below
++         * (same lifting order, same boundary mirroring), so output is
++         * bit-exact; the remainder keeps the per-column gather. */
++        lpt = 0;
++        if (s->f_blockbuf && lv >= 8)
++            lpt = dwt_decode97_float_ver_block(s, data, w, lv, mv, lh);
+         l = line + mv;
+-        for (lp = 0; lp < lh; lp++) {
++        for (lp = lpt; lp < lh; lp++) {
+             int i, j = 0;
+             // copy with interleaving
+             for (i = mv; i < lv; i += 2, j++)
+@@ -563,6 +780,18 @@ int ff_jpeg2000_dwt_init(DWTContext *s, int border[2][2],
+         s->f_linebuf = av_malloc_array((maxlen + 12), sizeof(*s->f_linebuf));
+         if (!s->f_linebuf)
+             return AVERROR(ENOMEM);
++        if (decomp_levels > 0) {
++            /* transposed scratch for the row-wise (block) vertical pass:
++             * rows cover signal indices [i0-4, i1+3]; the widest vertical
++             * extent is the finest level, linelen[ndeclevels-1][1] */
++            s->f_blockbuf = av_malloc_array(
++                (size_t)(s->linelen[decomp_levels - 1][1] + 8) * F_DWT_BLOCK,
++                sizeof(float));
++            if (!s->f_blockbuf) {
++                av_freep(&s->f_linebuf);
++                return AVERROR(ENOMEM);
++            }
++        }
+         break;
+      case FF_DWT97_INT:
+         s->i_linebuf = av_malloc_array((maxlen + 12), sizeof(*s->i_linebuf));
+@@ -623,4 +852,5 @@ void ff_dwt_destroy(DWTContext *s)
+ {
+     av_freep(&s->f_linebuf);
+     av_freep(&s->i_linebuf);
++    av_freep(&s->f_blockbuf);
+ }
+diff --git a/libavcodec/jpeg2000dwt.h b/libavcodec/jpeg2000dwt.h
+index 62f0548ac8..6ddf8b7046 100644
+--- a/libavcodec/jpeg2000dwt.h
++++ b/libavcodec/jpeg2000dwt.h
+@@ -49,6 +49,7 @@ typedef struct DWTContext {
+     uint8_t type;                        ///< 0 for 9/7; 1 for 5/3
+     int32_t *i_linebuf;                  ///< int buffer used by transform
+     float   *f_linebuf;                  ///< float buffer used by transform
++    float   *f_blockbuf;                 ///< transposed block scratch
+ } DWTContext;
+ 
+ /**
+diff --git a/libavcodec/mqc.c b/libavcodec/mqc.c
+index 6f7088ec48..0226001473 100644
+--- a/libavcodec/mqc.c
++++ b/libavcodec/mqc.c
+@@ -61,6 +61,37 @@ const uint8_t ff_mqc_nmps[2 * 47] = {
+     82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 90, 91, 92, 93
+ };
+ 
++/*
++ * Qe, MPS, next-MPS and next-LPS state of each context state, packed so the
++ * decoder reads all four with one 32-bit load.
++ */
++const uint32_t ff_mqc_packed[2 * 47] = {
++    0x03045601, 0x02075601, 0x0c083401, 0x0d0b3401,
++    0x120c1801, 0x130f1801, 0x18100ac1, 0x19130ac1,
++    0x3a140521, 0x3b170521, 0x42980221, 0x439b0221,
++    0x0d1c5601, 0x0c1f5601, 0x1c205401, 0x1d235401,
++    0x1c244801, 0x1d274801, 0x1c283801, 0x1d2b3801,
++    0x222c3001, 0x232f3001, 0x24302401, 0x25332401,
++    0x28341c01, 0x29371c01, 0x2a741601, 0x2b771601,
++    0x1d3c5601, 0x1c3f5601, 0x1c405401, 0x1d435401,
++    0x1e445101, 0x1f475101, 0x20484801, 0x214b4801,
++    0x224c3801, 0x234f3801, 0x24503401, 0x25533401,
++    0x26543001, 0x27573001, 0x26582801, 0x275b2801,
++    0x285c2401, 0x295f2401, 0x2a602201, 0x2b632201,
++    0x2c641c01, 0x2d671c01, 0x2e681801, 0x2f6b1801,
++    0x306c1601, 0x316f1601, 0x32701401, 0x33731401,
++    0x34741201, 0x35771201, 0x36781101, 0x377b1101,
++    0x387c0ac1, 0x397f0ac1, 0x3a8009c1, 0x3b8309c1,
++    0x3c8408a1, 0x3d8708a1, 0x3e880521, 0x3f8b0521,
++    0x408c0441, 0x418f0441, 0x429002a1, 0x439302a1,
++    0x44940221, 0x45970221, 0x46980141, 0x479b0141,
++    0x489c0111, 0x499f0111, 0x4aa00085, 0x4ba30085,
++    0x4ca40049, 0x4da70049, 0x4ea80025, 0x4fab0025,
++    0x50ac0015, 0x51af0015, 0x52b00009, 0x53b30009,
++    0x54b40005, 0x55b70005, 0x56b40001, 0x57b70001,
++    0x5cb85601, 0x5dbb5601,
++};
++
+ void ff_mqc_init_contexts(MqcState *mqc)
+ {
+     memset(mqc->cx_states, 0, sizeof(mqc->cx_states));
+diff --git a/libavcodec/mqc.h b/libavcodec/mqc.h
+index 5e782b05f9..a966fc99be 100644
+--- a/libavcodec/mqc.h
++++ b/libavcodec/mqc.h
+@@ -30,6 +30,9 @@
+ 
+ #include <stdint.h>
+ 
++#include "libavutil/attributes.h"
++#include "libavutil/intmath.h"
++
+ #define MQC_CX_UNI 17
+ #define MQC_CX_RL  18
+ 
+@@ -37,6 +40,13 @@ extern const uint16_t ff_mqc_qe[2 * 47];
+ extern const uint8_t  ff_mqc_nlps[2 * 47];
+ extern const uint8_t  ff_mqc_nmps[2 * 47];
+ 
++/*
++ * Probability states packed for the decoder so that one load yields the
++ * value, the MPS and both transitions: Qe in bits 0-15, MPS in bit 16, the
++ * next MPS state in bits 17-23 and the next LPS state in bits 24-30.
++ */
++extern const uint32_t ff_mqc_packed[2 * 47];
++
+ typedef struct MqcState {
+     uint8_t *bp, *bpstart;
+     unsigned int a;
+@@ -44,8 +54,135 @@ typedef struct MqcState {
+     unsigned int ct;
+     uint8_t cx_states[19];
+     int raw;
++    uint64_t c64;         ///< code value in bits 48-63, read-ahead below
++    unsigned shift_count; ///< valid read-ahead bits below the code value
+ } MqcState;
+ 
++/*
++ * Decoder. In MQ mode the C-register holds the code value in bits 48-63 and
++ * up to 48 bits of read-ahead below it, so renormalization shifts once for
++ * all the bits it needs instead of once per bit, and the symbol decision is
++ * branchless. This is the form used by T.88 Annex G.
++ *
++ * The tier-1 loops call this millions of times per frame; with the state in
++ * a caller-local MqcState the compiler keeps C, A and the byte pointer in
++ * registers instead of reloading them around a cross-TU call.
++ */
++static av_always_inline void ff_mqc_bytein_inline(MqcState *mqc)
++{
++    /* BYTEIN, repeated while another byte fits below the code value. A byte
++     * after 0xFF may carry into the bits above it, so it is only read once no
++     * read-ahead bits remain; any other byte lands on zero bits and can be
++     * read early without changing what the cell sees. */
++    while (mqc->shift_count <= 40) {
++        if (*mqc->bp == 0xff) {
++            if (mqc->bp[1] > 0x8f) {
++                mqc->shift_count += 8;
++            } else if (!mqc->shift_count) {
++                mqc->bp++;
++                mqc->c64 += (0x7fULL << 41) - ((uint64_t)*mqc->bp << 41);
++                mqc->shift_count = 7;
++            } else
++                break;
++        } else {
++            mqc->bp++;
++            mqc->c64 += (uint64_t)(*mqc->bp ^ 0xff) << (40 - mqc->shift_count);
++            mqc->shift_count += 8;
++        }
++    }
++}
++
++/* RENORMD: shift A back to at least 0x8000, batching the shifts the
++ * read-ahead bits cover. */
++static av_always_inline void ff_mqc_renorm_inline(MqcState *mqc)
++{
++    while (!(mqc->a & 0x8000)) {
++        unsigned shift;
++
++        ff_mqc_bytein_inline(mqc);
++        shift = ff_clz(mqc->a) - 16;
++        if (shift > mqc->shift_count)
++            shift = mqc->shift_count;
++        mqc->a       <<= shift;
++        mqc->c64     <<= shift;
++        mqc->shift_count -= shift;
++    }
++}
++
++/* Byte input of the 32-bit C-register, kept for the raw (bypass) segments. */
++static av_always_inline void ff_mqc_bytein32_inline(MqcState *mqc)
++{
++    if (*mqc->bp == 0xff) {
++        if (*(mqc->bp + 1) > 0x8f)
++            mqc->c++;
++        else {
++            mqc->bp++;
++            mqc->c += 2 + 0xfe00 - (*mqc->bp << 9);
++        }
++    } else {
++        mqc->bp++;
++        mqc->c += 1 + 0xff00 - (*mqc->bp << 8);
++    }
++}
++
++static av_always_inline int ff_mqc_decode_bypass_inline(MqcState *mqc)
++{
++    int bit = !(mqc->c & 0x40000000);
++
++    if (!(mqc->c & 0xff)) {
++        mqc->c -= 0x100;
++        ff_mqc_bytein32_inline(mqc);
++    }
++    mqc->c += mqc->c;
++
++    return bit;
++}
++
++static av_always_inline int ff_mqc_decode_inline(MqcState *mqc,
++                                                 uint8_t *cxstate)
++{
++    uint32_t state, qe, a, is_lps, mask, cond, pick_nlps;
++    uint64_t mask64;
++    unsigned shift;
++    uint8_t *cx = cxstate;
++
++    if (mqc->raw)
++        return ff_mqc_decode_bypass_inline(mqc);
++
++    state = ff_mqc_packed[*cx];
++    qe    = state & 0xffff;
++    a     = mqc->a - qe;
++
++    /* The MPS/LPS decision, MPS_EXCHANGE and LPS_EXCHANGE of C.3.2, without
++     * branches: both exchanges differ only in whether the condition flips
++     * the role of the exchange, so one XOR handles both. */
++    is_lps = (mqc->c64 >> 48) >= a;
++    mask   = 0 - is_lps;
++    mask64 = 0 - (uint64_t)is_lps;
++    mqc->c64 -= ((uint64_t)a << 48) & mask64;
++    mqc->a    = (a & ~mask) | (qe & mask);
++
++    cond      = a < qe;
++    pick_nlps = cond ^ is_lps;
++    /* A probability-state transition happens exactly when A renormalizes:
++     * on every LPS, and on an MPS that leaves A below 0x8000. */
++    *cx = (is_lps | (a < 0x8000))
++        ? (state >> (17 + 7 * pick_nlps)) & 0x7f
++        : *cx;
++
++    /* Zero shifts in the common case, where A >= 0x8000 already. */
++    shift = ff_clz(mqc->a) - 16;
++    if (shift <= mqc->shift_count) {
++        mqc->a       <<= shift;
++        mqc->c64     <<= shift;
++        mqc->shift_count -= shift;
++    } else {
++        ff_mqc_renorm_inline(mqc);
++    }
++
++    return ((state >> 16) & 1) ^ pick_nlps;
++}
++
+ /* encoder */
+ 
+ /** initialize the encoder */
+diff --git a/libavcodec/mqcdec.c b/libavcodec/mqcdec.c
+index 34aa51951e..126bfb1e4d 100644
+--- a/libavcodec/mqcdec.c
++++ b/libavcodec/mqcdec.c
+@@ -27,81 +27,27 @@
+ 
+ #include "mqc.h"
+ 
+-static void bytein(MqcState *mqc)
+-{
+-    if (*mqc->bp == 0xff) {
+-        if (*(mqc->bp + 1) > 0x8f)
+-            mqc->c++;
+-        else {
+-            mqc->bp++;
+-            mqc->c += 2 + 0xfe00 - (*mqc->bp << 9);
+-        }
+-    } else {
+-        mqc->bp++;
+-        mqc->c += 1 + 0xff00 - (*mqc->bp << 8);
+-    }
+-}
+-
+-static int exchange(MqcState *mqc, uint8_t *cxstate, int lps)
+-{
+-    int d;
+-    if ((mqc->a < ff_mqc_qe[*cxstate]) ^ (!lps)) {
+-        if (lps)
+-            mqc->a = ff_mqc_qe[*cxstate];
+-        d = *cxstate & 1;
+-        *cxstate = ff_mqc_nmps[*cxstate];
+-    } else {
+-        if (lps)
+-            mqc->a = ff_mqc_qe[*cxstate];
+-        d = 1 - (*cxstate & 1);
+-        *cxstate = ff_mqc_nlps[*cxstate];
+-    }
+-    // do RENORMD: see ISO/IEC 15444-1:2002 §C.3.3
+-    do {
+-        if (!(mqc->c & 0xff)) {
+-            mqc->c -= 0x100;
+-            bytein(mqc);
+-        }
+-        mqc->a += mqc->a;
+-        mqc->c += mqc->c;
+-    } while (!(mqc->a & 0x8000));
+-    return d;
+-}
+-
+ void ff_mqc_initdec(MqcState *mqc, uint8_t *bp, int raw, int reset)
+ {
+     mqc->raw = raw;
+     if (reset)
+         ff_mqc_init_contexts(mqc);
+     mqc->bp = bp;
+-    mqc->c  = (*mqc->bp ^ 0xff) << 16;
+-    bytein(mqc);
+-    mqc->c = mqc->c << 7;
+-    mqc->a = 0x8000;
+-}
+-
+-static int mqc_decode_bypass(MqcState *mqc) {
+-    int bit = !(mqc->c & 0x40000000);
+-    if (!(mqc->c & 0xff)) {
+-        mqc->c -= 0x100;
+-        bytein(mqc);
++    if (raw) {
++        mqc->c  = (*mqc->bp ^ 0xff) << 16;
++        ff_mqc_bytein32_inline(mqc);
++        mqc->c = mqc->c << 7;
++    } else {
++        mqc->c64 = (uint64_t)(*mqc->bp ^ 0xff) << 48;
++        mqc->shift_count = 0;
++        ff_mqc_bytein_inline(mqc);
++        mqc->c64 <<= 7;
++        mqc->shift_count -= 7;
+     }
+-    mqc->c += mqc->c;
+-    return bit;
++    mqc->a = 0x8000;
+ }
+ 
+ int ff_mqc_decode(MqcState *mqc, uint8_t *cxstate)
+ {
+-    if (mqc->raw)
+-        return mqc_decode_bypass(mqc);
+-    mqc->a -= ff_mqc_qe[*cxstate];
+-    if ((mqc->c >> 16) < mqc->a) {
+-        if (mqc->a & 0x8000)
+-            return *cxstate & 1;
+-        else
+-            return exchange(mqc, cxstate, 0);
+-    } else {
+-        mqc->c -= mqc->a << 16;
+-        return exchange(mqc, cxstate, 1);
+-    }
++    return ff_mqc_decode_inline(mqc, cxstate);
+ }
+diff --git a/libavcodec/tests/jpeg2000dwt.c b/libavcodec/tests/jpeg2000dwt.c
+index a6ba190a54..ef42e92ab2 100644
+--- a/libavcodec/tests/jpeg2000dwt.c
++++ b/libavcodec/tests/jpeg2000dwt.c
+@@ -117,6 +117,184 @@ static int array[MAX_W * MAX_W];
+ static int ref  [MAX_W * MAX_W];
+ static float arrayf[MAX_W * MAX_W];
+ static float reff  [MAX_W * MAX_W];
++static float arrayf_dec[MAX_W * MAX_W];
++static float arrayf_dec_ref[MAX_W * MAX_W];
++
++/*
++ * Pre-patch 9/7 float synthesis schedule. The lifting kernel and boundary
++ * extension are shared with the current implementation; this reference keeps
++ * the original per-row and per-column gather/scatter order so the block and
++ * fused paths can be checked against it.
++ */
++static void dwt_decode97_float_ref(DWTContext *s, float *t)
++{
++    int lev;
++    int w       = s->linelen[s->ndeclevels - 1][0];
++    float *line = s->f_linebuf;
++    float *data = t;
++    /* position at index O of line range [0-5,w+5] cf. extend function */
++    line += 5;
++
++    for (lev = 0; lev < s->ndeclevels; lev++) {
++        int lh = s->linelen[lev][0],
++            lv = s->linelen[lev][1],
++            mh = s->mod[lev][0],
++            mv = s->mod[lev][1],
++            lp;
++        float *l;
++        // HOR_SD
++        l = line + mh;
++        for (lp = 0; lp < lv; lp++) {
++            int i, j = 0;
++            // copy with interleaving
++            for (i = mh; i < lh; i += 2, j++)
++                l[i] = data[w * lp + j];
++            for (i = 1 - mh; i < lh; i += 2, j++)
++                l[i] = data[w * lp + j];
++
++            sr_1d97_float(line, mh, mh + lh);
++
++            for (i = 0; i < lh; i++)
++                data[w * lp + i] = l[i];
++        }
++
++        // VER_SD
++        l = line + mv;
++        for (lp = 0; lp < lh; lp++) {
++            int i, j = 0;
++            // copy with interleaving
++            for (i = mv; i < lv; i += 2, j++)
++                l[i] = data[w * j + lp];
++            for (i = 1 - mv; i < lv; i += 2, j++)
++                l[i] = data[w * j + lp];
++
++            sr_1d97_float(line, mv, mv + lv);
++
++            for (i = 0; i < lv; i++)
++                data[w * i + lp] = l[i];
++        }
++    }
++}
++
++/* The two schedules perform the same arithmetic; this tolerance only covers
++ * excess precision and FP contraction differences between them. */
++#define DWT97_DIFF_TOL 1.0e-6f
++
++static int test_dwt97_decode(int border[2][2], int decomp_levels, AVLFG *prng)
++{
++    DWTContext s = { 0 }, ref = { 0 };
++    int w, h, ret;
++    int first = -1;
++    float first_a = 0, first_b = 0, max_diff = 0;
++    size_t i, n;
++
++    ret = ff_jpeg2000_dwt_init(&s, border, decomp_levels, FF_DWT97);
++    if (ret < 0) {
++        fprintf(stderr, "ff_jpeg2000_dwt_init failed\n");
++        return 1;
++    }
++    ret = ff_jpeg2000_dwt_init(&ref, border, decomp_levels, FF_DWT97);
++    if (ret < 0) {
++        fprintf(stderr, "ff_jpeg2000_dwt_init (reference) failed\n");
++        ff_dwt_destroy(&s);
++        return 1;
++    }
++
++    w = s.linelen[decomp_levels - 1][0];
++    h = s.linelen[decomp_levels - 1][1];
++    n = (size_t)w * h;
++    if (n > MAX_W * MAX_W) {
++        fprintf(stderr, "test buffer too small: %dx%d\n", w, h);
++        ff_dwt_destroy(&s);
++        ff_dwt_destroy(&ref);
++        return 1;
++    }
++
++    for (i = 0; i < n; i++) {
++        float v = (av_lfg_get(prng) % 2000001) / 1000000.0f - 1.0f;
++        arrayf_dec[i] = arrayf_dec_ref[i] = v;
++    }
++
++    ret = ff_dwt_decode(&s, arrayf_dec);
++    if (ret < 0) {
++        fprintf(stderr, "ff_dwt_decode failed\n");
++        ff_dwt_destroy(&s);
++        ff_dwt_destroy(&ref);
++        return 1;
++    }
++    dwt_decode97_float_ref(&ref, arrayf_dec_ref);
++
++    for (i = 0; i < n; i++) {
++        float diff = FFABS(arrayf_dec[i] - arrayf_dec_ref[i]);
++        max_diff = FFMAX(max_diff, diff);
++        if (!(diff <= DWT97_DIFF_TOL) && first < 0) {
++            first = (int)i;
++            first_a = arrayf_dec[i];
++            first_b = arrayf_dec_ref[i];
++        }
++    }
++
++    if (first >= 0) {
++        fprintf(stderr,
++                "9/7f decode mismatch: %dx%d border %d %d %d %d levels %d "
++                "at %d: %g != %g (max diff %g)\n",
++                w, h, border[0][0], border[0][1], border[1][0], border[1][1],
++                decomp_levels, first, first_a, first_b, max_diff);
++        ret = 1;
++    } else {
++        ret = 0;
++    }
++
++    ff_dwt_destroy(&s);
++    ff_dwt_destroy(&ref);
++    return ret;
++}
++
++static int test_dwt97_decode_ref(void)
++{
++    /* Widths below F_DWT_BLOCK use the scalar fallback, 16..31 cover every
++     * block tail once, 32..47 add two-block tails, and the larger widths
++     * exercise multi-block tails. Heights below 8 exercise the scalar
++     * vertical path. The full matrix is 4,288 cases. */
++    static const int ws[] = { 8, 9, 12, 15,
++                              16, 17, 18, 19, 20, 21, 22, 23,
++                              24, 25, 26, 27, 28, 29, 30, 31,
++                              32, 33, 34, 40, 47, 48, 63, 64, 100, 128 };
++    static const int hs[] = { 7, 8, 9, 12, 16, 17, 54, 55, 90, 100 };
++    AVLFG prng;
++    size_t wi, hi;
++    int lev, x0, y0, ret;
++    int border[2][2];
++
++    av_lfg_init(&prng, 2);
++
++    for (wi = 0; wi < FF_ARRAY_ELEMS(ws); wi++) {
++        for (hi = 0; hi < FF_ARRAY_ELEMS(hs); hi++) {
++            int w = ws[wi], h = hs[hi];
++            int maxlev = 0, t = FFMIN(w, h);
++
++            while ((1 << (maxlev + 1)) <= t && maxlev < 6)
++                maxlev++;
++
++            for (lev = 1; lev <= maxlev; lev++) {
++                for (x0 = 0; x0 <= 1; x0++) {
++                    for (y0 = 0; y0 <= 1; y0++) {
++                        border[0][0] = x0;
++                        border[0][1] = x0 + w;
++                        border[1][0] = y0;
++                        border[1][1] = y0 + h;
++
++                        ret = test_dwt97_decode(border, lev, &prng);
++                        if (ret)
++                            return ret;
++                    }
++                }
++            }
++        }
++    }
++
++    return 0;
++}
+ 
+ int main(void) {
+     AVLFG prng;
+@@ -126,6 +304,10 @@ int main(void) {
+ 
+     av_lfg_init(&prng, 1);
+ 
++    ret = test_dwt97_decode_ref();
++    if (ret)
++        return ret;
++
+     for (i = 0; i<MAX_W * MAX_W; i++)
+         arrayf[i] = reff[i] = array[i] = ref[i] =  av_lfg_get(&prng) % 2048;
+ 
+diff --git a/tests/checkasm/jpeg2000dsp.c b/tests/checkasm/jpeg2000dsp.c
+index c9158ab3de..ae11d1e78f 100644
+--- a/tests/checkasm/jpeg2000dsp.c
++++ b/tests/checkasm/jpeg2000dsp.c
+@@ -41,6 +41,11 @@
+             src[i] = (float)rnd() / (UINT_MAX >> 5); \
+     } while (0)
+ 
++static const int mct_sizes[] = {
++    0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33,
++    63, 64, 65, 127, 128, 129, 255, 256, 257, 511, BUF_SIZE
++};
++
+ static void check_rct_int(void)
+ {
+     LOCAL_ALIGNED_32(int32_t, src, [BUF_SIZE*3]);
+@@ -49,18 +54,29 @@ static void check_rct_int(void)
+     int32_t *ref0 = &ref[BUF_SIZE*0], *new0 = &new[BUF_SIZE*0];
+     int32_t *ref1 = &ref[BUF_SIZE*1], *new1 = &new[BUF_SIZE*1];
+     int32_t *ref2 = &ref[BUF_SIZE*2], *new2 = &new[BUF_SIZE*2];
++    size_t n;
+ 
+     declare_func(void, void *src0, void *src1, void *src2, int csize);
+ 
++    for (n = 0; n < FF_ARRAY_ELEMS(mct_sizes); n++) {
++        int csize = mct_sizes[n];
++
++        randomize_buffers();
++        memcpy(ref, src, BUF_SIZE * 3 * sizeof(*src));
++        memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
++        call_ref(ref0, ref1, ref2, csize);
++        call_new(new0, new1, new2, csize);
++        /* Compare the csize samples the transform returns. SIMD that
++         * rounds up to a full vector may touch the caller's padding,
++         * which the decoder allocates. */
++        if (memcmp(ref0, new0, csize * sizeof(*src)) ||
++            memcmp(ref1, new1, csize * sizeof(*src)) ||
++            memcmp(ref2, new2, csize * sizeof(*src))) {
++            fprintf(stderr, "csize=%d\n", csize);
++            fail();
++        }
++    }
+     randomize_buffers();
+-    memcpy(ref, src, BUF_SIZE * 3 * sizeof(*src));
+-    memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
+-    call_ref(ref0, ref1, ref2, BUF_SIZE);
+-    call_new(new0, new1, new2, BUF_SIZE);
+-    if (memcmp(ref0, new0, BUF_SIZE * sizeof(*src)) ||
+-        memcmp(ref1, new1, BUF_SIZE * sizeof(*src)) ||
+-        memcmp(ref2, new2, BUF_SIZE * sizeof(*src)))
+-        fail();
+     memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
+     bench_new(new0, new1, new2, BUF_SIZE);
+ }
+@@ -74,17 +90,29 @@ static void check_ict_float(void)
+     float *ref1 = &ref[BUF_SIZE*1], *new1 = &new[BUF_SIZE*1];
+     float *ref2 = &ref[BUF_SIZE*2], *new2 = &new[BUF_SIZE*2];
+ 
++    size_t n;
++
+     declare_func(void, void *src0, void *src1, void *src2, int csize);
+ 
++    for (n = 0; n < FF_ARRAY_ELEMS(mct_sizes); n++) {
++        int csize = mct_sizes[n];
++
++        randomize_buffers_float();
++        memcpy(ref, src, BUF_SIZE * 3 * sizeof(*src));
++        memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
++        call_ref(ref0, ref1, ref2, csize);
++        call_new(new0, new1, new2, csize);
++        /* Compare the csize samples the transform returns. SIMD that
++         * rounds up to a full vector may touch the caller's padding,
++         * which the decoder allocates. */
++        if (!float_near_abs_eps_array(ref0, new0, 1.0e-5, csize) ||
++            !float_near_abs_eps_array(ref1, new1, 1.0e-5, csize) ||
++            !float_near_abs_eps_array(ref2, new2, 1.0e-5, csize)) {
++            fprintf(stderr, "csize=%d\n", csize);
++            fail();
++        }
++    }
+     randomize_buffers_float();
+-    memcpy(ref, src, BUF_SIZE * 3 * sizeof(*src));
+-    memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
+-    call_ref(ref0, ref1, ref2, BUF_SIZE);
+-    call_new(new0, new1, new2, BUF_SIZE);
+-    if (!float_near_abs_eps_array(ref0, new0, 1.0e-5, BUF_SIZE) ||
+-        !float_near_abs_eps_array(ref1, new1, 1.0e-5, BUF_SIZE) ||
+-        !float_near_abs_eps_array(ref2, new2, 1.0e-5, BUF_SIZE))
+-        fail();
+     memcpy(new, src, BUF_SIZE * 3 * sizeof(*src));
+     bench_new(new0, new1, new2, BUF_SIZE);
+ }

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build stock and patched FFmpeg at a pinned revision.
+# Build stock, NEON-only and fused trees at a pinned FFmpeg revision.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 REV=${FFMPEG_REV:-94cafa1805620244885192f3d9d020e2a425099d}
 SRC=${FFMPEG_SRC:-$ROOT/.ffmpeg-src}
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
+CC=${CC:-cc}
 
 CFG=(
     --disable-everything
@@ -19,10 +20,13 @@ CFG=(
     --enable-demuxer=image2pipe
     --enable-demuxer=image_j2k_pipe
     --enable-muxer=null
+    --enable-muxer=framemd5
     --enable-encoder=wrapped_avframe
+    --enable-encoder=rawvideo
     --enable-protocol=file
     --enable-protocol=pipe
     --enable-checkasm
+    --cc="$CC"
     --extra-cflags="-O3 -g"
 )
 
@@ -33,6 +37,19 @@ if [ ! -d "$SRC/.git" ]; then
     git -C "$SRC" fetch --depth=1 origin "$REV"
     git -C "$SRC" checkout -q FETCH_HEAD
 fi
+
+apply_patch() {
+    local patch=$1
+
+    if git apply --check "$patch"; then
+        git apply "$patch"
+    elif git apply --reverse --check "$patch"; then
+        echo "already applied: $patch"
+    else
+        echo "patch does not apply: $patch" >&2
+        exit 1
+    fi
+}
 
 build_one() {
     local name=$1
@@ -46,9 +63,7 @@ build_one() {
     (
         cd "$dir"
         for patch in "$@"; do
-            if git apply --check "$patch" 2>/dev/null; then
-                git apply "$patch"
-            fi
+            apply_patch "$patch"
         done
         if [ ! -f config.h ]; then
             ./configure "${CFG[@]}"
@@ -60,3 +75,6 @@ build_one() {
 mkdir -p "$ROOT/work"
 build_one stock
 build_one neon "$ROOT/patches/aarch64-neon.patch"
+build_one min "$ROOT/patches/0001-packed-writer.patch" \
+              "$ROOT/patches/0002-fused-mct-write.patch"
+build_one fused "$ROOT/patches/combined-fused.patch"
