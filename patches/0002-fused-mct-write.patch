@@ -1,5 +1,5 @@
 diff --git a/libavcodec/jpeg2000dec.c b/libavcodec/jpeg2000dec.c
-index b6695e7b22..01a71a9ab7 100644
+index b6695e7b22..febde80958 100644
 --- a/libavcodec/jpeg2000dec.c
 +++ b/libavcodec/jpeg2000dec.c
 @@ -25,9 +25,14 @@
@@ -17,7 +17,7 @@ index b6695e7b22..01a71a9ab7 100644
  #include "libavutil/attributes.h"
  #include "libavutil/avassert.h"
  #include "libavutil/common.h"
-@@ -2393,11 +2398,100 @@ WRITE_FRAME(16, uint16_t)
+@@ -2393,11 +2398,106 @@ WRITE_FRAME(16, uint16_t)
  
  #undef WRITE_FRAME
  
@@ -50,17 +50,32 @@ index b6695e7b22..01a71a9ab7 100644
 +}
 +
 +#if ARCH_AARCH64
++static av_always_inline int32x4_t ict_float_vec_round(float32x4_t v,
++                                                      int32x4_t voff,
++                                                      int32x4_t vzero,
++                                                      int32x4_t vmax,
++                                                      int32x4_t vshift)
++{
++    v = vaddq_s32(vcvtnq_s32_f32(v), voff);
++    return vshlq_s32(vminq_s32(vmaxq_s32(v, vzero), vmax), vshift);
++}
++
++/* The arithmetic uses plain vector operators so that each compiler applies
++ * the same FP contraction policy it applies to ict_float(): GCC builds
++ * FFmpeg in ISO C mode and does not contract, Clang contracts within the
++ * expression. Keeping the expressions identical to ict_float() keeps this
++ * path bit-exact with the C reference of the compiler that built it. */
 +static void ict_float_row_neon(const float *s0, const float *s1,
 +                               const float *s2, uint16_t *dst, int w,
 +                               int off, int max, int shift)
 +{
 +    const float32x4_t c0 = vdupq_n_f32(1.402f);
-+    const float32x4_t c1 = vdupq_n_f32(-0.34413f);
-+    const float32x4_t c2 = vdupq_n_f32(-0.71414f);
++    const float32x4_t c1 = vdupq_n_f32(0.34413f);
++    const float32x4_t c2 = vdupq_n_f32(0.71414f);
 +    const float32x4_t c3 = vdupq_n_f32(1.772f);
-+    const int32x4_t vzero = vdupq_n_s32(0);
-+    const int32x4_t voff  = vdupq_n_s32(off);
-+    const int32x4_t vmax  = vdupq_n_s32(max);
++    const int32x4_t vzero  = vdupq_n_s32(0);
++    const int32x4_t voff   = vdupq_n_s32(off);
++    const int32x4_t vmax   = vdupq_n_s32(max);
 +    const int32x4_t vshift = vdupq_n_s32(shift);
 +    int x;
 +
@@ -71,32 +86,23 @@ index b6695e7b22..01a71a9ab7 100644
 +        const float32x4_t b0 = vld1q_f32(s0 + x + 4);
 +        const float32x4_t b1 = vld1q_f32(s1 + x + 4);
 +        const float32x4_t b2 = vld1q_f32(s2 + x + 4);
-+        float32x4_t i0a = vfmaq_f32(a0, a2, c0);
-+        float32x4_t i1a = vfmaq_f32(a0, a1, c1);
-+        float32x4_t i2a = vfmaq_f32(a0, a1, c3);
-+        float32x4_t i0b = vfmaq_f32(b0, b2, c0);
-+        float32x4_t i1b = vfmaq_f32(b0, b1, c1);
-+        float32x4_t i2b = vfmaq_f32(b0, b1, c3);
-+        int32x4_t o0a, o0b, o1a, o1b, o2a, o2b;
-+        uint16x8_t u0, u1, u2;
++        const float32x4_t i0a = a0 + c0 * a2;
++        const float32x4_t i1a = a0 - c1 * a1 - c2 * a2;
++        const float32x4_t i2a = a0 + c3 * a1;
++        const float32x4_t i0b = b0 + c0 * b2;
++        const float32x4_t i1b = b0 - c1 * b1 - c2 * b2;
++        const float32x4_t i2b = b0 + c3 * b1;
 +        uint16x8x3_t out;
 +
-+        i1a = vfmaq_f32(i1a, a2, c2);
-+        i1b = vfmaq_f32(i1b, b2, c2);
-+
-+        o0a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i0a), voff), vzero), vmax), vshift);
-+        o0b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i0b), voff), vzero), vmax), vshift);
-+        o1a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i1a), voff), vzero), vmax), vshift);
-+        o1b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i1b), voff), vzero), vmax), vshift);
-+        o2a = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i2a), voff), vzero), vmax), vshift);
-+        o2b = vshlq_s32(vminq_s32(vmaxq_s32(vaddq_s32(vcvtnq_s32_f32(i2b), voff), vzero), vmax), vshift);
-+
-+        u0 = vcombine_u16(vqmovun_s32(o0a), vqmovun_s32(o0b));
-+        u1 = vcombine_u16(vqmovun_s32(o1a), vqmovun_s32(o1b));
-+        u2 = vcombine_u16(vqmovun_s32(o2a), vqmovun_s32(o2b));
-+        out.val[0] = u0;
-+        out.val[1] = u1;
-+        out.val[2] = u2;
++        out.val[0] = vcombine_u16(
++            vqmovun_s32(ict_float_vec_round(i0a, voff, vzero, vmax, vshift)),
++            vqmovun_s32(ict_float_vec_round(i0b, voff, vzero, vmax, vshift)));
++        out.val[1] = vcombine_u16(
++            vqmovun_s32(ict_float_vec_round(i1a, voff, vzero, vmax, vshift)),
++            vqmovun_s32(ict_float_vec_round(i1b, voff, vzero, vmax, vshift)));
++        out.val[2] = vcombine_u16(
++            vqmovun_s32(ict_float_vec_round(i2a, voff, vzero, vmax, vshift)),
++            vqmovun_s32(ict_float_vec_round(i2b, voff, vzero, vmax, vshift)));
 +        vst3q_u16(dst, out);
 +        dst += 24;
 +    }
@@ -120,37 +126,25 @@ index b6695e7b22..01a71a9ab7 100644
  {
      Jpeg2000Component *comp = tile->comp;
      const int cbps  = s->cbps[0];
-@@ -2412,6 +2506,7 @@ static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
-     const int p0 = s->cdef[0] ? s->cdef[0] - 1 : 0;
-     const int p1 = s->cdef[1] ? s->cdef[1] - 1 : 1;
-     const int p2 = s->cdef[2] ? s->cdef[2] - 1 : 2;
-+    const int identity = p0 == 0 && p1 == 1 && p2 == 2;
-     int x, y;
- 
-     for (y = 0; y < h; y++) {
-@@ -2421,6 +2516,21 @@ static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
+@@ -2421,6 +2521,17 @@ static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
          uint16_t *dst = (uint16_t *)picture->data[0] +
                          (ptrdiff_t)y * (picture->linesize[0] / 2);
  
 +        if (mct) {
-+            if (identity) {
 +#if ARCH_AARCH64
++            if (p0 == 0 && p1 == 1 && p2 == 2)
 +                ict_float_row_neon(d0, d1, d2, dst, w, off, max, shift);
-+#else
-+                ict_float_row_scalar(d0, d1, d2, dst, w, off, max, shift,
-+                                     0, 1, 2);
++            else
 +#endif
-+            } else {
 +                ict_float_row_scalar(d0, d1, d2, dst, w, off, max, shift,
 +                                     p0, p1, p2);
-+            }
 +            continue;
 +        }
 +
          for (x = 0; x < w; x++) {
              dst[p0] = av_clip(lrintf(d0[x]) + off, 0, max) << shift;
              dst[p1] = av_clip(lrintf(d1[x]) + off, 0, max) << shift;
-@@ -2472,20 +2582,26 @@ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
+@@ -2472,20 +2583,26 @@ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
      if (ret < 0)
          return ret;
  

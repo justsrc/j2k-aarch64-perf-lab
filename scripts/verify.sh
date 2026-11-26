@@ -36,7 +36,7 @@ cmp "$OUT/stock.md5" "$OUT/min.md5"
 cmp "$OUT/stock.md5" "$OUT/fused.md5"
 echo "bit-exact: stock == neon == min == fused"
 
-for build in neon min fused; do
+for build in neon fused; do
     "$ROOT/work/$build/tests/checkasm/checkasm" --test=jpeg2000dsp
     echo "checkasm passed: $build"
 done

@@ -48,10 +48,16 @@ machine, against stock at the same pinned revision:
 
 | threads | tree | real (s) | CPU (s) | speedup |
 |--------:|------|---------:|--------:|--------:|
-| 1 | stock | 10.662 | 10.637 | 1.000x |
-| 1 | packed writer + fused ICT | 10.232 | 10.222 | **1.042x wall, 1.041x CPU** |
-| 8 | stock | 2.076 | 13.807 | 1.000x |
-| 8 | packed writer + fused ICT | 2.002 | 13.460 | **1.037x wall, 1.026x CPU** |
+| 1 | stock | 10.628 | 10.613 | 1.000x |
+| 1 | packed writer + fused ICT | 10.099 | 10.072 | **1.052x wall, 1.054x CPU** |
+| 8 | stock | 2.062 | 13.888 | 1.000x |
+| 8 | packed writer + fused ICT | 1.987 | 13.401 | **1.038x wall, 1.036x CPU** |
+
+The fused kernel uses plain vector operators rather than explicit `vfmaq`
+intrinsics, so each compiler applies the same FP contraction policy it applies
+to the scalar reference: GCC builds FFmpeg in ISO C mode and does not contract,
+Clang contracts within the expression. The result is bit-exact with stock on
+both compilers, and the CI gate checks that per job.
 
 The full 240-frame `framemd5` is identical across stock, the minimal series
 and the full fused tree.

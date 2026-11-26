@@ -50,17 +50,20 @@ jobs:
         run: ./scripts/build.sh
 
       - name: Checkasm and bit-exactness
+        shell: bash
         run: |
           mkdir -p results
           ./scripts/verify.sh | tee results/verify-linux-${{ matrix.tag }}-${{ matrix.cc }}.txt
 
       - name: Checkasm kernel timing (indicative only)
+        shell: bash
         run: |
           work/neon/tests/checkasm/checkasm --test=jpeg2000dsp --bench \
             2>&1 | tee results/checkasm-bench-linux-${{ matrix.tag }}-${{ matrix.cc }}.txt
 
       - name: Coarse timing (optional, non-authoritative)
         if: github.event_name == 'workflow_dispatch' && inputs.timing
+        shell: bash
         run: |
           THREADS=1 ROUNDS=3 ./scripts/bench.sh \
             | tee results/bench-linux-${{ matrix.tag }}-${{ matrix.cc }}-1t.txt
@@ -92,17 +95,20 @@ jobs:
         run: ./scripts/build.sh
 
       - name: Checkasm and bit-exactness
+        shell: bash
         run: |
           mkdir -p results
           ./scripts/verify.sh | tee results/verify-macos-${{ matrix.tag }}.txt
 
       - name: Checkasm kernel timing (indicative only)
+        shell: bash
         run: |
           work/neon/tests/checkasm/checkasm --test=jpeg2000dsp --bench \
             2>&1 | tee results/checkasm-bench-macos-${{ matrix.tag }}.txt
 
       - name: Coarse timing (optional, non-authoritative)
         if: github.event_name == 'workflow_dispatch' && inputs.timing
+        shell: bash
         run: |
           THREADS=1 ROUNDS=3 ./scripts/bench.sh \
             | tee results/bench-macos-${{ matrix.tag }}-1t.txt
