@@ -1,0 +1,4 @@
+.ffmpeg-src/
+work/
+results/*.tsv
+results/*.log
