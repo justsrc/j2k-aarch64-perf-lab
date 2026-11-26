@@ -1,5 +1,5 @@
 diff --git a/libavcodec/jpeg2000dec.c b/libavcodec/jpeg2000dec.c
-index b6695e7b22..febde80958 100644
+index b6695e7b22..021f8ae8f0 100644
 --- a/libavcodec/jpeg2000dec.c
 +++ b/libavcodec/jpeg2000dec.c
 @@ -25,9 +25,14 @@
@@ -17,7 +17,7 @@ index b6695e7b22..febde80958 100644
  #include "libavutil/attributes.h"
  #include "libavutil/avassert.h"
  #include "libavutil/common.h"
-@@ -2393,11 +2398,106 @@ WRITE_FRAME(16, uint16_t)
+@@ -2393,11 +2398,107 @@ WRITE_FRAME(16, uint16_t)
  
  #undef WRITE_FRAME
  
@@ -56,8 +56,9 @@ index b6695e7b22..febde80958 100644
 +                                                      int32x4_t vmax,
 +                                                      int32x4_t vshift)
 +{
-+    v = vaddq_s32(vcvtnq_s32_f32(v), voff);
-+    return vshlq_s32(vminq_s32(vmaxq_s32(v, vzero), vmax), vshift);
++    const int32x4_t i = vaddq_s32(vcvtnq_s32_f32(v), voff);
++
++    return vshlq_s32(vminq_s32(vmaxq_s32(i, vzero), vmax), vshift);
 +}
 +
 +/* The arithmetic uses plain vector operators so that each compiler applies
@@ -126,7 +127,7 @@ index b6695e7b22..febde80958 100644
  {
      Jpeg2000Component *comp = tile->comp;
      const int cbps  = s->cbps[0];
-@@ -2421,6 +2521,17 @@ static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
+@@ -2421,6 +2522,17 @@ static void write_frame_16_packed(const Jpeg2000DecoderContext *s,
          uint16_t *dst = (uint16_t *)picture->data[0] +
                          (ptrdiff_t)y * (picture->linesize[0] / 2);
  
@@ -144,7 +145,7 @@ index b6695e7b22..febde80958 100644
          for (x = 0; x < w; x++) {
              dst[p0] = av_clip(lrintf(d0[x]) + off, 0, max) << shift;
              dst[p1] = av_clip(lrintf(d1[x]) + off, 0, max) << shift;
-@@ -2472,20 +2583,26 @@ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
+@@ -2472,20 +2584,26 @@ static int jpeg2000_decode_tile(AVCodecContext *avctx, void *td,
      if (ret < 0)
          return ret;
  
